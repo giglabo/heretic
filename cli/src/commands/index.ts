@@ -1,0 +1,10 @@
+export { runInit } from "./init";
+export { runLocalInit } from "./localInit";
+export { runUpdate, applyPendingUpdate } from "./update";
+export { runAgent } from "./run-agent";
+export { runPs } from "./ps";
+export { runStop } from "./stop";
+export { runAttach } from "./attach";
+export { createAgentsCommand } from "./agents";
+export { runLocalValidate } from "./local-validate";
+export { runDoctor } from "./doctor";

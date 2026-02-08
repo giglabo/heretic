@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run bundle
+      - name: Verify bundle
+        run: bun dist/heretic-cli.js --version
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  build-binaries:
+    needs: publish-npm
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            artifact: heretic-cli-linux-x64
+          - os: ubuntu-latest
+            target: bun-linux-arm64
+            artifact: heretic-cli-linux-arm64
+          - os: macos-latest
+            target: bun-darwin-x64
+            artifact: heretic-cli-macos-x64
+          - os: macos-latest
+            target: bun-darwin-arm64
+            artifact: heretic-cli-macos-arm64
+          - os: windows-latest
+            target: bun-windows-x64
+            artifact: heretic-cli-windows.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Build native binary
+        run: bun build ./src/index.ts --compile --target=${{ matrix.target }} --outfile dist/${{ matrix.artifact }}
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: cli/dist/${{ matrix.artifact }}

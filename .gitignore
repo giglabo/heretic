@@ -1,0 +1,7 @@
+docs/**/*.md
+.idea
+logs
+temp
+**/temp
+tmp
+*.log

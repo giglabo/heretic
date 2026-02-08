@@ -1,2 +1,2 @@
-# heretic
+# VibeCoder Heretic
 VibeCoder Heretic
