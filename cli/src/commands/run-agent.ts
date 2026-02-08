@@ -84,7 +84,7 @@ export async function runAgent(
       // Detached mode: log container ID and exit
       logger.info(`Container started in detached mode`);
       logger.info(`Container ID: ${result.containerId}`);
-      logger.info(`Run 'heretic attach ${result.containerId}' to attach to this container`);
+      logger.info(`Run 'heretic-cli attach ${result.containerId}' to attach to this container`);
     } else {
       // Interactive mode: container has exited
       if (result.exitCode !== undefined) {
@@ -101,7 +101,7 @@ export async function runAgent(
       // Handle specific error cases with user-friendly messages
       if (error.message.includes("Profile not found")) {
         logger.error(`Profile '${agentName}' not found.`);
-        logger.info(`Run 'heretic agents list' to see available profiles.`);
+        logger.info(`Run 'heretic-cli agents list' to see available profiles.`);
         process.exitCode = 1;
         return;
       }

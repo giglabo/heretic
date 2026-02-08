@@ -72,8 +72,8 @@ logRaw("Help text without formatting");
 Users can enable verbose logging with `--verbose` or `-V`:
 
 ```bash
-heretic --verbose init
-heretic -V run <name>
+heretic-cli --verbose init
+heretic-cli -V run <name>
 ```
 
 ### File Logging
@@ -121,23 +121,23 @@ The CLI automatically manages (cross-platform):
 ### Agent Commands
 
 ```bash
-heretic init                    # Interactive setup wizard
-heretic agents list             # List all configured agents
-heretic agents show <name>      # Show profile details
-heretic agents validate         # Validate all profiles
-heretic agents delete <name>           # Delete agent, containers, and files
-heretic agents delete <name> -f        # Delete without confirmation
-heretic agents mcp <name>              # Paste MCP JSON into global profile
-heretic agents mcp <name> --file f.json  # Read MCP JSON from file
-heretic agents mcp <name> --local      # Apply to local override
-heretic run <name>              # Run in interactive mode
-heretic run <name> -d           # Run in detached mode
-heretic run <name> -s feat-x   # Run in a named session
-heretic <name>                  # Shorthand for run
-heretic stop <name>             # Stop specific agent (with confirmation)
-heretic stop <name> --force     # Stop without confirmation
-heretic stop --all              # Stop all heretic containers
-heretic stop -s feat-x         # Stop containers in a specific session
+heretic-cli init                    # Interactive setup wizard
+heretic-cli agents list             # List all configured agents
+heretic-cli agents show <name>      # Show profile details
+heretic-cli agents validate         # Validate all profiles
+heretic-cli agents delete <name>           # Delete agent, containers, and files
+heretic-cli agents delete <name> -f        # Delete without confirmation
+heretic-cli agents mcp <name>              # Paste MCP JSON into global profile
+heretic-cli agents mcp <name> --file f.json  # Read MCP JSON from file
+heretic-cli agents mcp <name> --local      # Apply to local override
+heretic-cli run <name>              # Run in interactive mode
+heretic-cli run <name> -d           # Run in detached mode
+heretic-cli run <name> -s feat-x   # Run in a named session
+heretic-cli <name>                  # Shorthand for run
+heretic-cli stop <name>             # Stop specific agent (with confirmation)
+heretic-cli stop <name> --force     # Stop without confirmation
+heretic-cli stop --all              # Stop all heretic containers
+heretic-cli stop -s feat-x         # Stop containers in a specific session
 ```
 
 ### Profile Structure
@@ -203,8 +203,8 @@ The runners filter out env vars with empty string values to avoid overriding con
 
 Claude Code settings use a two-layer system:
 
-1. **Global** (`~/.heretic/<agent>-settings.json`) - Created by `heretic init`
-2. **Local** (`.heretic/cli/claude-settings.json`) - Created by `heretic local-init`
+1. **Global** (`~/.heretic/<agent>-settings.json`) - Created by `heretic-cli init`
+2. **Local** (`.heretic/cli/claude-settings.json`) - Created by `heretic-cli local-init`
 
 At runtime, local settings are **auto-detected and merged** with global:
 
@@ -216,7 +216,7 @@ At runtime, local settings are **auto-detected and merged** with global:
 
 ### Provider-Aware Templates
 
-`local-init` generates provider-aware templates:
+`heretic-cli local-init` generates provider-aware templates:
 
 **ZAI** - Includes model override examples:
 ```json
@@ -305,7 +305,7 @@ Secrets are resolved **before** `${VAR}` interpolation in the config resolver (s
 | `.cmd` / `.bat` | N/A | `cmd.exe` (default) |
 | `.ps1` | N/A | `powershell -ExecutionPolicy Bypass -File` |
 
-`heretic init` creates `.sh` on Unix and `.cmd` on Windows. Users can replace these with `.ps1` scripts or secret manager integrations (1Password, Keychain, pass).
+`heretic-cli init` creates `.sh` on Unix and `.cmd` on Windows. Users can replace these with `.ps1` scripts or secret manager integrations (1Password, Keychain, pass).
 
 ## Testing Guidelines
 
@@ -378,8 +378,8 @@ When modifying agent-related code:
 
 1. **Update `cli/docs/USER_GUIDE.md`** - Document any new commands, options, or behavior changes
 2. **Update `cli/docs/AGENTS.md`** - Keep agent configuration examples current
-3. **Test with `heretic init`** - Ensure the wizard creates valid configurations
-4. **Validate profiles** - Run `heretic agents validate` after changes
+3. **Test with `heretic-cli init`** - Ensure the wizard creates valid configurations
+4. **Validate profiles** - Run `heretic-cli agents validate` after changes
 
 ## Important Files
 

@@ -246,7 +246,7 @@ export async function runLocalInit(
 
     if (profiles.length === 0) {
       logger.error("No agent profiles found in ~/.heretic/agents/");
-      logger.info("Run 'heretic init' to configure agent profiles first.");
+      logger.info("Run 'heretic-cli init' to configure agent profiles first.");
       process.exit(1);
     }
 

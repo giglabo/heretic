@@ -94,7 +94,7 @@ export async function listAgents(options: ListAgentsOptions): Promise<void> {
       if (options.json) {
         logRaw(JSON.stringify([], null, 2));
       } else {
-        logRaw("No agent profiles found. Run 'heretic agents add <name>' to create one.");
+        logRaw("No agent profiles found. Run 'heretic-cli agents add <name>' to create one.");
       }
       return;
     }
@@ -1096,7 +1096,7 @@ export async function editAgent(name: string, options: EditAgentOptions): Promis
   } catch (error) {
     if (error instanceof Error && error.message.includes("Profile not found")) {
       logger.error(
-        `Profile '${name}' not found. Use 'heretic agents list' to see available profiles.`
+        `Profile '${name}' not found. Use 'heretic-cli agents list' to see available profiles.`
       );
     } else {
       logger.error(
@@ -1194,7 +1194,7 @@ export async function showAgent(name: string, options: ShowAgentOptions): Promis
   } catch (error) {
     if (error instanceof Error && error.message.includes("Profile not found")) {
       logger.error(
-        `Profile '${name}' not found. Use 'heretic agents list' to see available profiles.`
+        `Profile '${name}' not found. Use 'heretic-cli agents list' to see available profiles.`
       );
     } else {
       logger.error({ error }, "Failed to show agent profile");
@@ -1268,7 +1268,7 @@ export async function validateAgents(name?: string): Promise<void> {
       const profileNames = listProfiles();
 
       if (profileNames.length === 0) {
-        logRaw("No agent profiles found. Run 'heretic agents add <name>' to create one.");
+        logRaw("No agent profiles found. Run 'heretic-cli agents add <name>' to create one.");
         return;
       }
 
@@ -1346,7 +1346,7 @@ export async function mcpAgent(profileName: string, options: McpAgentOptions): P
     const profilePath = join(getProfilesDir(), `${profileName}.yaml`);
     if (!existsSync(profilePath)) {
       logger.error(
-        `Profile '${profileName}' not found. Use 'heretic agents list' to see available profiles.`
+        `Profile '${profileName}' not found. Use 'heretic-cli agents list' to see available profiles.`
       );
       process.exit(1);
     }
@@ -1475,7 +1475,7 @@ export async function mcpAgent(profileName: string, options: McpAgentOptions): P
   } catch (error) {
     if (error instanceof Error && error.message.includes("Profile not found")) {
       logger.error(
-        `Profile '${profileName}' not found. Use 'heretic agents list' to see available profiles.`
+        `Profile '${profileName}' not found. Use 'heretic-cli agents list' to see available profiles.`
       );
     } else {
       logger.error(
@@ -1521,7 +1521,7 @@ export async function deleteAgent(name: string, options: DeleteAgentOptions): Pr
 
     if (!existsSync(profilePath)) {
       logger.error(
-        `Profile '${name}' not found. Use 'heretic agents list' to see available profiles.`
+        `Profile '${name}' not found. Use 'heretic-cli agents list' to see available profiles.`
       );
       process.exit(1);
     }

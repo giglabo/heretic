@@ -79,7 +79,7 @@ export function createProgram(): Command {
     .option("-s, --session <name>", "Filter by session name")
     .addHelpText(
       "after",
-      "\nExamples:\n  $ heretic ps\n  $ heretic ps --json\n  $ heretic ps -s my-session"
+      "\nExamples:\n  $ heretic-cli ps\n  $ heretic-cli ps --json\n  $ heretic-cli ps -s my-session"
     )
     .action(async (options) => {
       await runPs({ json: options.json, session: options.session });
@@ -149,7 +149,7 @@ export function createProgram(): Command {
   });
 
   // Handle unknown commands as shortcuts to `run <agent-name>`
-  // This allows `heretic claude` instead of `heretic run claude`
+  // This allows `heretic-cli claude` instead of `heretic-cli run claude`
   program.on("command:*", async (operands: string[]) => {
     const unknownCommand = operands[0];
 

@@ -19,7 +19,7 @@ export class ProfileNotFoundError extends HereticError {
   constructor(name: string) {
     super(
       `Profile '${name}' not found`,
-      "Run 'heretic agents list' to see available profiles, or 'heretic agents add <name>' to create one."
+      "Run 'heretic-cli agents list' to see available profiles, or 'heretic-cli agents add <name>' to create one."
     );
   }
 }
@@ -43,7 +43,7 @@ export class ConfigValidationError extends HereticError {
   constructor(errors: string[]) {
     super(
       `Configuration validation failed:\n${errors.map((e) => `  - ${e}`).join("\n")}`,
-      "Run 'heretic local-validate' to see all issues."
+      "Run 'heretic-cli local-validate' to see all issues."
     );
   }
 }
@@ -67,8 +67,8 @@ export class LocalConfigNotFoundError extends HereticError {
       ? `No local configuration found for profile '${profileName}' in ${projectDir}`
       : `No local configuration found in ${projectDir}`;
     const hint = profileName
-      ? `Run 'heretic local-init ${profileName}' to create a local override.`
-      : "Run 'heretic local-init <profile>' to create a local agent configuration.";
+      ? `Run 'heretic-cli local-init ${profileName}' to create a local override.`
+      : "Run 'heretic-cli local-init <profile>' to create a local agent configuration.";
     super(msg, hint);
   }
 }

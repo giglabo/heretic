@@ -986,8 +986,10 @@ export async function runInit(): Promise<void> {
     profiles.forEach((name) => {
       logger.info(`  - ${name}`);
     });
-    logger.info(`\nRun an agent with: heretic <profile-name>`);
+    logger.info(`\nRun an agent with: heretic-cli <profile-name>`);
   } else {
-    logger.info("\nNo agent profiles configured. Run 'heretic agents add <name>' to create one.");
+    logger.info(
+      "\nNo agent profiles configured. Run 'heretic-cli agents add <name>' to create one."
+    );
   }
 }

@@ -18,22 +18,22 @@ bun install
 
 | Command | Description |
 |---------|-------------|
-| `heretic init` | Interactive setup: GitHub tokens + agent profiles |
-| `heretic run <profile>` | Run an agent by profile name |
-| `heretic ps` | List running agent containers |
-| `heretic stop [name]` | Stop agent container(s) |
-| `heretic attach <name>` | Attach to a running agent container |
-| `heretic agents list` | List configured agent profiles |
-| `heretic agents show <name>` | Show agent profile details |
-| `heretic agents edit <name>` | Edit an agent profile |
-| `heretic agents validate` | Validate all profiles |
-| `heretic agents delete <name>` | Delete agent and associated files |
-| `heretic local-init [profile]` | Initialize per-profile local override |
-| `heretic local-validate [profile]` | Validate local config(s) |
-| `heretic doctor` | Run environment health checks |
-| `heretic update` | Check for and install updates |
+| `heretic-cli init` | Interactive setup: GitHub tokens + agent profiles |
+| `heretic-cli run <profile>` | Run an agent by profile name |
+| `heretic-cli ps` | List running agent containers |
+| `heretic-cli stop [name]` | Stop agent container(s) |
+| `heretic-cli attach <name>` | Attach to a running agent container |
+| `heretic-cli agents list` | List configured agent profiles |
+| `heretic-cli agents show <name>` | Show agent profile details |
+| `heretic-cli agents edit <name>` | Edit an agent profile |
+| `heretic-cli agents validate` | Validate all profiles |
+| `heretic-cli agents delete <name>` | Delete agent and associated files |
+| `heretic-cli local-init [profile]` | Initialize per-profile local override |
+| `heretic-cli local-validate [profile]` | Validate local config(s) |
+| `heretic-cli doctor` | Run environment health checks |
+| `heretic-cli update` | Check for and install updates |
 
-Unknown commands are treated as agent profile names, so `heretic claude` is equivalent to `heretic run claude`.
+Unknown commands are treated as agent profile names, so `heretic-cli claude` is equivalent to `heretic-cli run claude`.
 
 For full usage details, options, and examples see [Heretic Docs](https://heretic.giglabo.com/docs).
 
@@ -91,8 +91,6 @@ cli/
 │       ├── settings.ts        # Settings I/O
 │       └── session.ts         # Session management
 ├── tests/                     # bun:test test suite
-├── docs/
-│   └── USER_GUIDE.md          # End-user documentation
 ├── examples/                  # Usage examples
 └── dist/                      # Build output (gitignored)
 ```

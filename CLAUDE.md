@@ -47,12 +47,12 @@ The CLI lives entirely in `cli/`. Entry point is `src/index.ts` which checks for
 All agent configuration MUST be done via CLI commands:
 
 ```bash
-heretic init              # Interactive setup: GitHub tokens + agent profiles
-heretic agents list       # List configured agents
-heretic agents show <n>   # Show agent profile details
-heretic agents validate   # Validate all profiles
-heretic agents delete <n> # Delete agent, containers, and associated files
-heretic run <profile>     # Run an agent
+heretic-cli init              # Interactive setup: GitHub tokens + agent profiles
+heretic-cli agents list       # List configured agents
+heretic-cli agents show <n>   # Show agent profile details
+heretic-cli agents validate   # Validate all profiles
+heretic-cli agents delete <n> # Delete agent, containers, and associated files
+heretic-cli run <profile>     # Run an agent
 ```
 
 The CLI automatically creates (cross-platform):

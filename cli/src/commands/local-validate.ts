@@ -98,7 +98,7 @@ export async function runLocalValidate(profileName?: string): Promise<void> {
 
   if (profiles.length === 0) {
     logger.error("No local config files found in .heretic/cli/");
-    logger.info("Run 'heretic local-init <profile>' to create one.");
+    logger.info("Run 'heretic-cli local-init <profile>' to create one.");
     process.exit(1);
   }
 
