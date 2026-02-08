@@ -4,14 +4,13 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
+import { existsSync } from "fs";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { loadProfile, saveProfile } from "../src/utils/profile-loader";
 import {
   loadLocalConfig,
   saveLocalConfig,
-  getLocalConfigPath,
   hasLocalConfig,
 } from "../src/utils/local-config";
 import { parseMcpJson } from "../src/runners/mcp-helper";

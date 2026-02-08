@@ -3,7 +3,7 @@ import { join } from "path";
 import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "fs";
 import { runLocalInit } from "../src/commands/localInit";
 import { getLocalConfigPath, getLocalComposePath } from "../src/utils/local-config";
-import { writeYamlFile, readYamlFile } from "../src/utils/yaml";
+import { writeYamlFile } from "../src/utils/yaml";
 import { getPathProvider } from "../src/utils/profile-paths";
 import { createTestContext } from "./test-helpers";
 

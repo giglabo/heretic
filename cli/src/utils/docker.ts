@@ -46,7 +46,7 @@ export async function isDockerAvailable(docker?: Docker): Promise<boolean> {
   try {
     await client.ping();
     return true;
-  } catch (error) {
+  } catch {
     return false;
   }
 }

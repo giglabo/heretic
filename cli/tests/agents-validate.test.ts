@@ -1,7 +1,6 @@
-import { describe, test, expect, beforeEach, afterEach, spyOn, mock } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { validateAgents } from "../src/commands/agents";
 import * as profileLoader from "../src/utils/profile-loader";
-import type { AgentProfile } from "../src/types/agent-profile";
 import * as fs from "fs";
 
 describe("agents validate", () => {
@@ -26,13 +25,6 @@ describe("agents validate", () => {
   });
 
   test("validates a single valid profile", async () => {
-    const mockProfile: AgentProfile = {
-      image: "test:latest",
-      runner: "docker",
-      volumes: [{ source: "/host", target: "/container" }],
-      env: { KEY: "value" },
-    };
-
     mocks.push(spyOn(profileLoader, "getProfilesDir").mockReturnValue("/fake/path"));
     mocks.push(spyOn(fs, "existsSync").mockReturnValue(true));
     mocks.push(

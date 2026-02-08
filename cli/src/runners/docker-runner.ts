@@ -558,52 +558,48 @@ export class DockerRunner implements Runner {
   private async runInteractive(container: Docker.Container): Promise<RunResult> {
     const { spawn } = await import("child_process");
 
-    try {
-      // Start container first
-      logger.info("Starting container...");
-      await container.start();
-      logger.info({ containerId: this.containerId }, "Container started");
+    // Start container first
+    logger.info("Starting container...");
+    await container.start();
+    logger.info({ containerId: this.containerId }, "Container started");
 
-      // Fix ownership of bind-mounted session directories so the container user can write
-      await this.fixMountPermissions(container);
+    // Fix ownership of bind-mounted session directories so the container user can write
+    await this.fixMountPermissions(container);
 
-      // Use docker attach command directly - more reliable for interactive TTY
-      logger.info("Attaching to container...");
+    // Use docker attach command directly - more reliable for interactive TTY
+    logger.info("Attaching to container...");
 
-      return new Promise((resolve, reject) => {
-        const dockerAttach = spawn("docker", ["attach", this.containerId!], {
-          stdio: "inherit", // Inherit stdin, stdout, stderr directly
-        });
-
-        dockerAttach.on("error", (err) => {
-          logger.error({ error: err }, "Failed to attach to container");
-          reject(err);
-        });
-
-        dockerAttach.on("close", async (code) => {
-          logger.info({ containerId: this.containerId, exitCode: code }, "Container session ended");
-
-          // Get actual container exit code
-          try {
-            const info = await container.inspect();
-            const exitCode = info.State.ExitCode;
-            resolve({
-              containerId: this.containerId!,
-              exitCode,
-              status: "exited",
-            });
-          } catch {
-            resolve({
-              containerId: this.containerId!,
-              exitCode: code ?? 0,
-              status: "exited",
-            });
-          }
-        });
+    return new Promise((resolve, reject) => {
+      const dockerAttach = spawn("docker", ["attach", this.containerId!], {
+        stdio: "inherit", // Inherit stdin, stdout, stderr directly
       });
-    } catch (error) {
-      throw error;
-    }
+
+      dockerAttach.on("error", (err) => {
+        logger.error({ error: err }, "Failed to attach to container");
+        reject(err);
+      });
+
+      dockerAttach.on("close", async (code) => {
+        logger.info({ containerId: this.containerId, exitCode: code }, "Container session ended");
+
+        // Get actual container exit code
+        try {
+          const info = await container.inspect();
+          const exitCode = info.State.ExitCode;
+          resolve({
+            containerId: this.containerId!,
+            exitCode,
+            status: "exited",
+          });
+        } catch {
+          resolve({
+            containerId: this.containerId!,
+            exitCode: code ?? 0,
+            status: "exited",
+          });
+        }
+      });
+    });
   }
 
   /**

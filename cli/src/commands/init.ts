@@ -1,5 +1,5 @@
 import inquirer from "inquirer";
-import { writeFileSync, existsSync, chmodSync, readFileSync } from "fs";
+import { writeFileSync, existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { getLogger } from "../logger";
 import {
@@ -8,7 +8,6 @@ import {
   maskToken,
   getHereticDir,
   resolveToken,
-  isScriptPath,
 } from "../utils/settings";
 import {
   saveProfile,

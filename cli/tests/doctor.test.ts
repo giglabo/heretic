@@ -104,7 +104,7 @@ describe("Doctor Command", () => {
   it("exits with 0 when all checks pass", async () => {
     try {
       await runDoctor({});
-    } catch (error) {
+    } catch {
       // Expected to throw due to process.exit mock
     }
 
@@ -116,7 +116,7 @@ describe("Doctor Command", () => {
 
     try {
       await runDoctor({});
-    } catch (error) {
+    } catch {
       // Expected to throw due to process.exit mock
     }
 
@@ -132,7 +132,7 @@ describe("Doctor Command", () => {
 
     try {
       await runDoctor({});
-    } catch (error) {
+    } catch {
       // Expected to throw due to process.exit mock
     }
 
@@ -146,7 +146,7 @@ describe("Doctor Command", () => {
 
     try {
       await runDoctor({ fix: true });
-    } catch (error) {
+    } catch {
       // Expected to throw due to process.exit mock
     }
 
@@ -162,7 +162,7 @@ describe("Doctor Command", () => {
 
     try {
       await runDoctor({});
-    } catch (error) {
+    } catch {
       // Expected to throw due to process.exit mock
     }
 
@@ -175,7 +175,7 @@ describe("Doctor Command", () => {
 
     try {
       await runDoctor({});
-    } catch (error) {
+    } catch {
       // Expected to throw due to process.exit mock
     }
 
@@ -187,7 +187,7 @@ describe("Doctor Command", () => {
 
     try {
       await runDoctor({});
-    } catch (error) {
+    } catch {
       // Expected to throw due to process.exit mock
     }
 
@@ -201,7 +201,7 @@ describe("Doctor Command", () => {
 
     try {
       await runDoctor({});
-    } catch (error) {
+    } catch {
       // Expected to throw due to process.exit mock
     }
 
@@ -219,7 +219,7 @@ describe("Doctor Command", () => {
 
     try {
       await runDoctor({ fix: true });
-    } catch (error) {
+    } catch {
       // Expected to throw due to process.exit mock
     }
 
@@ -231,7 +231,7 @@ describe("Doctor Command", () => {
 
     try {
       await runDoctor({});
-    } catch (error) {
+    } catch {
       // Expected to throw due to process.exit mock
     }
 
@@ -245,7 +245,7 @@ describe("Doctor Command", () => {
 
     try {
       await runDoctor({});
-    } catch (error) {
+    } catch {
       // Expected to throw due to process.exit mock
     }
 

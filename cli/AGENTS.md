@@ -337,6 +337,20 @@ const exitSpy = spyOn(process, "exit").mockImplementation(() => {
 - Prefix unused parameters with `_` (e.g., `_args`)
 - Prettier: 2-space indent, double quotes, semicolons, trailing commas
 
+## Lint Must Pass
+
+**IMPORTANT:** Every time you modify CLI source or test files, run `bun run lint` from `cli/` and fix **all errors** before committing. CI treats lint errors as build failures.
+
+Common lint errors to avoid:
+
+| Rule | Fix |
+|------|-----|
+| `no-unused-vars` | Remove unused imports/variables. Use bare `catch {` instead of `catch (error) {` when the error variable is not used. |
+| `no-require-imports` | Use `import { foo } from "module"` instead of `require("module")`. |
+| `no-useless-catch` | Remove `try/catch` blocks that only re-throw: `catch (e) { throw e }`. |
+
+Warnings (`no-explicit-any`, `explicit-function-return-type`) do not block CI but should be minimized in new code.
+
 ## Build Notes
 
 **IMPORTANT:** After modifying any CLI source code, always rebuild the native binary:

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { runAgent } from "../src/commands/run-agent";
 import { runPs } from "../src/commands/ps";
 import { runStop } from "../src/commands/stop";
@@ -70,7 +70,7 @@ describe("Agent Commands Integration", () => {
 
       try {
         await runAgent("test-profile", { detach: false });
-      } catch (error) {
+      } catch {
         // Expected to throw due to exit
       }
 
@@ -90,7 +90,7 @@ describe("Agent Commands Integration", () => {
 
       try {
         await runAgent("test-profile", { detach: true });
-      } catch (error) {
+      } catch {
         // Expected to throw due to exit
       }
 
@@ -108,7 +108,7 @@ describe("Agent Commands Integration", () => {
 
       try {
         await runPs({ json: false });
-      } catch (error) {
+      } catch {
         // Expected to throw due to exit
       }
 
@@ -125,7 +125,7 @@ describe("Agent Commands Integration", () => {
 
       try {
         await runPs({ json: true });
-      } catch (error) {
+      } catch {
         // Expected to throw due to exit
       }
 
@@ -150,7 +150,7 @@ describe("Agent Commands Integration", () => {
 
       try {
         await runPs({ json: false });
-      } catch (error) {
+      } catch {
         // Expected to throw due to exit
       }
 
@@ -170,7 +170,7 @@ describe("Agent Commands Integration", () => {
           force: true,
           keep: false,
         });
-      } catch (error) {
+      } catch {
         // Expected to throw due to exit
       }
 
@@ -190,7 +190,7 @@ describe("Agent Commands Integration", () => {
           force: true,
           keep: false,
         });
-      } catch (error) {
+      } catch {
         // Expected to throw due to exit
       }
 
@@ -211,7 +211,7 @@ describe("Agent Commands Integration", () => {
           force: true,
           keep: false,
         });
-      } catch (error) {
+      } catch {
         // Expected to throw due to exit
       }
 
@@ -231,7 +231,7 @@ describe("Agent Commands Integration", () => {
           force: true,
           keep: true,
         });
-      } catch (error) {
+      } catch {
         // Expected to throw due to exit
       }
 

@@ -116,6 +116,17 @@ cd cli && bun run build
 
 The user runs the compiled `heretic-cli` binary, not the dev source. Source changes have no effect until the binary is rebuilt.
 
+## Lint Must Pass
+
+**IMPORTANT:** Every time you modify CLI source or test files, run `bun run lint` from `cli/` and fix **all errors** before committing. CI treats lint errors as failures. Common pitfalls:
+
+- **Unused imports** — remove them, don't just prefix with `_`.
+- **Unused catch binding** — use bare `catch {` instead of `catch (error) {` when the variable is not referenced.
+- **`no-require-imports`** — use `import` instead of `require()`.
+- **`no-useless-catch`** — remove `try/catch` blocks that just re-throw (`catch (e) { throw e }`).
+
+Warnings (`no-explicit-any`, `explicit-function-return-type`) do not block CI but should be minimized.
+
 ## Code Conventions
 
 - **Always use Pino logger** (`import { getLogger } from "../logger"`), never `console.log`/`console.error`. Use `logRaw()` for unformatted CLI output.

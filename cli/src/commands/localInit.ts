@@ -191,7 +191,7 @@ function checkGitignore(projectDir: string): string | null {
     }
 
     return "Consider adding '.heretic/cli/' to your .gitignore to exclude local config from version control.";
-  } catch (error) {
+  } catch {
     return null; // Can't read .gitignore
   }
 }

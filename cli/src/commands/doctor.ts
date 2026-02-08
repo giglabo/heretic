@@ -100,7 +100,7 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<void> 
         message: "Docker Compose not available (optional for most operations)",
       });
     }
-  } catch (_error) {
+  } catch {
     results.push({
       name: "Docker Compose",
       status: "warn",
@@ -150,7 +150,7 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<void> 
       status: "pass",
       message: `${settingsFile} is valid`,
     });
-  } catch (_error) {
+  } catch {
     results.push({
       name: "Settings file",
       status: "warn",
@@ -326,7 +326,7 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<void> 
         message: `Docker Hub returned status ${response.status}`,
       });
     }
-  } catch (_error) {
+  } catch {
     results.push({
       name: "Network connectivity",
       status: "warn",

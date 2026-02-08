@@ -104,7 +104,7 @@ name: test
       // Clean up test file if it exists
       try {
         unlinkSync(testFile);
-      } catch (error) {
+      } catch {
         // Ignore if file doesn't exist
       }
     });

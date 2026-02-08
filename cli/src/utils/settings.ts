@@ -42,7 +42,7 @@ export function loadSettings(): HereticSettings {
   try {
     const settings = readYamlFile<HereticSettings>(settingsPath);
     return settings || {};
-  } catch (error) {
+  } catch {
     // If file is corrupted or invalid, return empty settings
     return {};
   }

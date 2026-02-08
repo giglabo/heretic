@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { existsSync, readFileSync } from "fs";
-import { loadProfile, saveProfile } from "../src/utils/profile-loader";
+import { loadProfile, saveProfile, validateProfile } from "../src/utils/profile-loader";
 import { getPathProvider } from "../src/utils/profile-paths";
 import type { AgentProfile } from "../src/types/agent-profile";
 import { createTestContext } from "./test-helpers";
@@ -80,8 +80,6 @@ describe("agents edit command", () => {
   });
 
   test("profile validation should catch missing required fields", () => {
-    const { validateProfile } = require("../src/utils/profile-loader");
-
     const invalidProfile = {
       // Missing 'image' and 'runner'
       interactive: true,
@@ -94,8 +92,6 @@ describe("agents edit command", () => {
   });
 
   test("profile validation should accept valid profile", () => {
-    const { validateProfile } = require("../src/utils/profile-loader");
-
     const validProfile: AgentProfile = {
       image: "test:latest",
       runner: "docker",

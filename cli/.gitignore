@@ -22,3 +22,12 @@ Thumbs.db
 
 # Test coverage
 coverage/
+
+# Secrets & credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx

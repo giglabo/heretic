@@ -1,7 +1,21 @@
-docs/**/*.md
+local-docs/**/*.md
 .idea
 logs
 temp
 **/temp
 tmp
 *.log
+
+# Secrets & credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials*
+**/secrets/
+*.secret
