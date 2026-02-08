@@ -323,8 +323,7 @@ async function configureAnthropicAgent(existingName?: string): Promise<AgentInpu
     {
       type: "input",
       name: "token",
-      message:
-        "Enter your Anthropic API token (optional, press Enter to skip):",
+      message: "Enter your Anthropic API token (optional, press Enter to skip):",
       default: "",
       validate: (): boolean => true,
     },

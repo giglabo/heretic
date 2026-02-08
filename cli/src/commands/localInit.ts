@@ -302,11 +302,7 @@ export async function runLocalInit(
     const provider = getProfileProvider(selectedProfile);
     const template = generateClaudeSettingsTemplate(provider);
     const providerLabel =
-      provider === "thirdparty"
-        ? "Third-Party"
-        : provider === "copilot"
-          ? "Copilot"
-          : "Anthropic";
+      provider === "thirdparty" ? "Third-Party" : provider === "copilot" ? "Copilot" : "Anthropic";
     writeFileSync(claudeSettingsPath, template + "\n", "utf-8");
     logger.info(`Created ${claudeSettingsPath} (${providerLabel} template)`);
     logger.info("  This file is auto-merged with global settings at runtime");

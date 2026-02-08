@@ -116,9 +116,16 @@ cd cli && bun run build
 
 The user runs the compiled `heretic-cli` binary, not the dev source. Source changes have no effect until the binary is rebuilt.
 
-## Lint Must Pass
+## Lint and Format Must Pass
 
-**IMPORTANT:** Every time you modify CLI source or test files, run `bun run lint` from `cli/` and fix **all errors** before committing. CI treats lint errors as failures. Common pitfalls:
+**IMPORTANT:** Every time you modify CLI source or test files, run both from `cli/`:
+
+```bash
+bun run format           # Auto-fix formatting (Prettier)
+bun run lint             # Check for lint errors (ESLint)
+```
+
+Fix **all errors** before committing. CI runs `bun run format:check` and `bun run lint` — both must pass. Common pitfalls:
 
 - **Unused imports** — remove them, don't just prefix with `_`.
 - **Unused catch binding** — use bare `catch {` instead of `catch (error) {` when the variable is not referenced.

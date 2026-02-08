@@ -272,9 +272,7 @@ function resolveSecretValue(value: string, envVarName: string): string {
   if (envName) {
     const envValue = process.env[envName];
     if (envValue === undefined) {
-      throw new Error(
-        `Secret "${envVarName}": environment variable "${envName}" is not set`
-      );
+      throw new Error(`Secret "${envVarName}": environment variable "${envName}" is not set`);
     }
     logger.debug({ envVar: envVarName, ref: envName }, "Resolved secret from env var");
     return envValue;
@@ -313,7 +311,13 @@ export function resolveSecrets(secrets: SecretsConfig): Record<string, string> {
   const resolved: Record<string, string> = {};
 
   for (const [envVar, value] of Object.entries(secrets)) {
-    logger.debug({ envVar, valueType: isScriptPath(value) ? "script" : matchEnvVarRef(value) ? "env" : "plain" }, "Resolving secret");
+    logger.debug(
+      {
+        envVar,
+        valueType: isScriptPath(value) ? "script" : matchEnvVarRef(value) ? "env" : "plain",
+      },
+      "Resolving secret"
+    );
 
     resolved[envVar] = resolveSecretValue(value, envVar);
 

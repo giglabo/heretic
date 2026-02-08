@@ -137,10 +137,7 @@ export function createProgram(): Command {
 
   // Global error handler
   program.exitOverride((err) => {
-    if (
-      err.code === "commander.help" ||
-      err.code === "commander.helpDisplayed"
-    ) {
+    if (err.code === "commander.help" || err.code === "commander.helpDisplayed") {
       process.exit(0);
     }
     if (err.code === "commander.version") {

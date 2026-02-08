@@ -171,7 +171,9 @@ compose:
     mocks.push(
       spyOn(profileLoader, "validateProfileDetailed").mockReturnValue({
         errors: [],
-        warnings: ['compose section present but runner is "docker". Compose config will be ignored.'],
+        warnings: [
+          'compose section present but runner is "docker". Compose config will be ignored.',
+        ],
       })
     );
 

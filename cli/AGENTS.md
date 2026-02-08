@@ -337,9 +337,16 @@ const exitSpy = spyOn(process, "exit").mockImplementation(() => {
 - Prefix unused parameters with `_` (e.g., `_args`)
 - Prettier: 2-space indent, double quotes, semicolons, trailing commas
 
-## Lint Must Pass
+## Lint and Format Must Pass
 
-**IMPORTANT:** Every time you modify CLI source or test files, run `bun run lint` from `cli/` and fix **all errors** before committing. CI treats lint errors as build failures.
+**IMPORTANT:** Every time you modify CLI source or test files, run both from `cli/`:
+
+```bash
+bun run format           # Auto-fix formatting (Prettier)
+bun run lint             # Check for lint errors (ESLint)
+```
+
+Fix **all errors** before committing. CI runs `bun run format:check` and `bun run lint` — both must pass.
 
 Common lint errors to avoid:
 

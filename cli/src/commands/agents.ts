@@ -171,14 +171,11 @@ export async function addAgent(name: string, options: AddAgentOptions): Promise<
     ]);
 
     // Required: Runner type
-    const selectedRunner = await promptList(
-      "Runner type:",
-      [
-        { name: "Docker", value: "docker" },
-        { name: "Docker Compose", value: "compose" },
-        { name: "Custom", value: "custom" },
-      ]
-    );
+    const selectedRunner = await promptList("Runner type:", [
+      { name: "Docker", value: "docker" },
+      { name: "Docker Compose", value: "compose" },
+      { name: "Custom", value: "custom" },
+    ]);
 
     // Optional: Volumes (repeating)
     const volumes: VolumeMount[] = [];
@@ -592,14 +589,11 @@ async function editProfileInteractive(
   ]);
 
   // Runner type
-  const selectedRunner = await promptList(
-    "Runner type:",
-    [
-      { name: "Docker", value: "docker" },
-      { name: "Docker Compose", value: "compose" },
-      { name: "Custom", value: "custom" },
-    ]
-  );
+  const selectedRunner = await promptList("Runner type:", [
+    { name: "Docker", value: "docker" },
+    { name: "Docker Compose", value: "compose" },
+    { name: "Custom", value: "custom" },
+  ]);
 
   // Volumes
   const volumes: VolumeMount[] = [];
@@ -999,13 +993,10 @@ async function editProfileWithEditor(
     } catch (error) {
       logRaw(`\n❌ Invalid YAML: ${error instanceof Error ? error.message : String(error)}`);
 
-      const retryAction = await promptList(
-        "What would you like to do?",
-        [
-          { name: "Re-edit", value: "retry" },
-          { name: "Discard changes", value: "discard" },
-        ]
-      );
+      const retryAction = await promptList("What would you like to do?", [
+        { name: "Re-edit", value: "retry" },
+        { name: "Discard changes", value: "discard" },
+      ]);
 
       if (retryAction === "retry") {
         // Recursive call to retry
@@ -1021,13 +1012,10 @@ async function editProfileWithEditor(
       logRaw(`\n❌ Invalid profile:\n`);
       errors.forEach((err) => logRaw(`  - ${err}`));
 
-      const retryAction = await promptList(
-        "What would you like to do?",
-        [
-          { name: "Re-edit", value: "retry" },
-          { name: "Discard changes", value: "discard" },
-        ]
-      );
+      const retryAction = await promptList("What would you like to do?", [
+        { name: "Re-edit", value: "retry" },
+        { name: "Discard changes", value: "discard" },
+      ]);
 
       if (retryAction === "retry") {
         // Write the edited (but invalid) content back to temp file for retry

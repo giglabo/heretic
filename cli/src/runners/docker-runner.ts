@@ -392,7 +392,12 @@ export class DockerRunner implements Runner {
       if (shouldMount) {
         const mcpMountPaths = getMcpMountPaths(config.agentType);
         const sessionDir = ensureSessionDir(config.projectDir, config.sessionName);
-        this.mcpFilePath = writeMcpFile(config.projectDir, config.mcp, sessionDir, config.agentType);
+        this.mcpFilePath = writeMcpFile(
+          config.projectDir,
+          config.mcp,
+          sessionDir,
+          config.agentType
+        );
         for (const mountPath of mcpMountPaths) {
           binds.push(`${this.mcpFilePath}:${mountPath}`);
         }
@@ -440,10 +445,7 @@ export class DockerRunner implements Runner {
       // Seed .claude.json to skip onboarding/login screen
       const claudeJsonPath = join(sessionDir, ".claude.json");
       if (!existsSync(claudeJsonPath)) {
-        writeFileSync(
-          claudeJsonPath,
-          JSON.stringify({ hasCompletedOnboarding: true }, null, 2)
-        );
+        writeFileSync(claudeJsonPath, JSON.stringify({ hasCompletedOnboarding: true }, null, 2));
         logger.debug("Seeded .claude.json with onboarding complete");
       }
       binds.push(`${claudeJsonPath}:/home/agent/.claude.json`);

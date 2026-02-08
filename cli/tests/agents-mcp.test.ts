@@ -8,11 +8,7 @@ import { existsSync } from "fs";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { loadProfile, saveProfile } from "../src/utils/profile-loader";
-import {
-  loadLocalConfig,
-  saveLocalConfig,
-  hasLocalConfig,
-} from "../src/utils/local-config";
+import { loadLocalConfig, saveLocalConfig, hasLocalConfig } from "../src/utils/local-config";
 import { parseMcpJson } from "../src/runners/mcp-helper";
 import type { AgentProfile, McpServer, LocalOverride } from "../src/types/agent-profile";
 import { createTestContext } from "./test-helpers";
