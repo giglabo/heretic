@@ -35,7 +35,7 @@ bun install
 
 Unknown commands are treated as agent profile names, so `heretic claude` is equivalent to `heretic run claude`.
 
-For full usage details, options, and examples see [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
+For full usage details, options, and examples see [docs/USER_GUIDE.md](../local-docs/cli/CLI_USER_GUIDE.md).
 
 ## Development
 
