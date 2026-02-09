@@ -1,0 +1,7 @@
+#!/bin/bash
+# sidecar-exec stub — placeholder when the real sidecar-exec is not available.
+# The actual sidecar-exec lives in build-sidecars/client/shell/sidecar-exec.
+# If you need sidecar support, copy the real script here or set the path
+# via SIDECAR_EXEC_PATH environment variable.
+echo "Error: sidecar-exec not available. Install the real sidecar-exec or use SSH backend." >&2
+exit 1
