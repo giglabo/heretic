@@ -7,6 +7,7 @@ import {
   saveSettings,
   maskToken,
   getHereticDir,
+  ensureSettingsDir,
   resolveToken,
 } from "../utils/settings";
 import {
@@ -777,7 +778,8 @@ async function manageAgents(): Promise<void> {
   const logger = getLogger();
   const hereticDir = getHereticDir();
 
-  // Ensure profiles directory exists
+  // Ensure directories exist
+  ensureSettingsDir();
   ensureProfilesDir();
 
   while (true) {
@@ -964,64 +966,55 @@ export async function runInit(): Promise<void> {
     {
       type: "input",
       name: "githubToken",
-      message: "Enter your GitHub token:",
-      default: maskedGithub,
-      validate: (input: string): string | boolean => {
-        if (maskedGithub && input === maskedGithub) {
-          return true;
-        }
-        if (!input || !input.trim()) {
-          return "GitHub token is required";
-        }
-        return true;
-      },
+      message: "Enter your GitHub token (optional, press Enter to skip):",
+      default: maskedGithub || "",
+      validate: (): boolean => true,
     },
     {
       type: "input",
       name: "copilotToken",
-      message: "Enter GitHub Copilot token (optional, press Enter to use primary token):",
-      default: maskedCopilot,
+      message: "Enter GitHub Copilot token (optional, press Enter to skip):",
+      default: maskedCopilot || "",
       validate: (): boolean => true,
     },
   ]);
 
+  // Ensure ~/.heretic/ exists before writing any files
+  ensureSettingsDir();
+
   // Determine if tokens changed or user kept existing
-  let githubScriptPath: string;
-  if (maskedGithub && githubAnswers.githubToken === maskedGithub) {
+  let githubScriptPath: string | undefined;
+  const githubTokenInput = githubAnswers.githubToken?.trim() || "";
+  if (maskedGithub && githubTokenInput === maskedGithub) {
     // User kept existing token
-    githubScriptPath = existingGithubScript!;
-  } else {
+    githubScriptPath = existingGithubScript;
+  } else if (githubTokenInput) {
     // New token - create secret script
-    githubScriptPath = createSecretsScript(hereticDir, "github-token", githubAnswers.githubToken);
+    githubScriptPath = createSecretsScript(hereticDir, "github-token", githubTokenInput);
     logger.info(`✓ Created GitHub token script: ${githubScriptPath}`);
   }
 
   let copilotScriptPath: string | undefined;
-  if (githubAnswers.copilotToken) {
-    if (maskedCopilot && githubAnswers.copilotToken === maskedCopilot) {
-      // User kept existing copilot token
-      copilotScriptPath = existingCopilotScript;
-    } else if (githubAnswers.copilotToken.trim()) {
-      // New copilot token - create secret script
-      copilotScriptPath = createSecretsScript(
-        hereticDir,
-        "copilot-token",
-        githubAnswers.copilotToken.trim()
-      );
-      logger.info(`✓ Created Copilot token script: ${copilotScriptPath}`);
-    }
+  const copilotTokenInput = githubAnswers.copilotToken?.trim() || "";
+  if (maskedCopilot && copilotTokenInput === maskedCopilot) {
+    // User kept existing copilot token
+    copilotScriptPath = existingCopilotScript;
+  } else if (copilotTokenInput) {
+    // New copilot token - create secret script
+    copilotScriptPath = createSecretsScript(hereticDir, "copilot-token", copilotTokenInput);
+    logger.info(`✓ Created Copilot token script: ${copilotScriptPath}`);
   }
 
   // Save script paths in settings (not raw tokens)
   const newSettings: HereticSettings = {
     github: {
-      token: githubScriptPath,
+      ...(githubScriptPath && { token: githubScriptPath }),
       ...(copilotScriptPath && { copilot_token: copilotScriptPath }),
     },
   };
 
   saveSettings(newSettings);
-  logger.info("✓ GitHub settings saved to ~/.heretic/settings.yaml");
+  logger.info("✓ Settings saved to ~/.heretic/settings.yaml");
 
   // Step 2: Manage Agent Profiles
   logger.info("\n=== Agent Configuration ===");
@@ -1029,11 +1022,15 @@ export async function runInit(): Promise<void> {
 
   // Show final summary
   logger.info("\n=== Configuration Complete ===");
-  try {
-    const resolvedGithub = resolveToken(githubScriptPath);
-    logger.info(`GitHub Token: ${maskToken(resolvedGithub)}`);
-  } catch {
-    logger.info(`GitHub Token: (script: ${githubScriptPath})`);
+  if (githubScriptPath) {
+    try {
+      const resolvedGithub = resolveToken(githubScriptPath);
+      logger.info(`GitHub Token: ${maskToken(resolvedGithub)}`);
+    } catch {
+      logger.info(`GitHub Token: (script: ${githubScriptPath})`);
+    }
+  } else {
+    logger.info("GitHub Token: (not configured)");
   }
   if (copilotScriptPath) {
     try {
@@ -1043,7 +1040,7 @@ export async function runInit(): Promise<void> {
       logger.info(`GitHub Copilot Token: (script: ${copilotScriptPath})`);
     }
   } else {
-    logger.info("GitHub Copilot Token: (using primary token)");
+    logger.info("GitHub Copilot Token: (not configured)");
   }
 
   const profiles = listProfiles();
