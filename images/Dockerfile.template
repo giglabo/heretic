@@ -1,0 +1,221 @@
+# Claude "Fat Cat" Agent Image
+# 
+# This is a template Dockerfile. Use build-claude-image script to generate
+# the final Dockerfile with your selected tools.
+#
+# Build arguments:
+#   BASE_IMAGE        - Base image (default: node:22-bookworm-slim)
+#   AGENT_USER        - Agent username (default: agent)
+#   AGENT_UID         - Agent user ID (default: 1000)
+#   AGENT_GID         - Agent group ID (default: 1000)
+#
+# Tool flags (passed as build args):
+#   INSTALL_PYTHON    - "true" to install Python
+#   INSTALL_NODE      - "true" to install Node.js (not needed for node:* base)
+#   INSTALL_GO        - "true" to install Go
+#   INSTALL_JAVA      - "true" to install Java
+#   INSTALL_RUST      - "true" to install Rust
+#   INSTALL_DOCKER    - "true" to install Docker CLI
+#   INSTALL_GH_CLI    - "true" to install GitHub CLI (default: true)
+#
+ARG BASE_IMAGE=node:22-bookworm-slim
+FROM ${BASE_IMAGE}
+
+ARG TARGETARCH
+ARG AGENT_USER=agent
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+
+# Tool installation flags
+ARG INSTALL_PYTHON=false
+ARG INSTALL_NODE=false
+ARG INSTALL_GO=false
+ARG INSTALL_JAVA=false
+ARG INSTALL_RUST=false
+ARG INSTALL_DOCKER=false
+ARG INSTALL_GH_CLI=true
+
+LABEL org.opencontainers.image.title="Claude Fat Cat Agent"
+LABEL org.opencontainers.image.description="Unified Claude agent with configurable tools"
+LABEL org.opencontainers.image.vendor="Cloud Agents"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    API_TIMEOUT_MS=3000000
+
+# =============================================================================
+# Base Dependencies
+# =============================================================================
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    jq \
+    xz-utils \
+    gnupg \
+    unzip \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# =============================================================================
+# Tool Installation (conditional)
+# =============================================================================
+
+# Node.js (only if not using node:* base and explicitly requested)
+RUN if [ "$INSTALL_NODE" = "true" ] && ! node --version >/dev/null 2>&1; then \
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+        && apt-get install -y nodejs \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Enable corepack for pnpm/yarn (if Node.js is available)
+RUN if command -v node >/dev/null 2>&1; then \
+        corepack enable; \
+    fi
+
+# Python
+RUN if [ "$INSTALL_PYTHON" = "true" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
+        && rm -rf /var/lib/apt/lists/* \
+        && ln -sf /usr/bin/python3 /usr/bin/python \
+        && pip3 install --break-system-packages --no-cache-dir \
+            poetry pytest black ruff mypy 2>/dev/null \
+        || pip3 install --no-cache-dir poetry pytest black ruff mypy; \
+    fi
+
+# Go
+RUN if [ "$INSTALL_GO" = "true" ]; then \
+        GO_VERSION=1.23.4 \
+        && case "${TARGETARCH}" in \
+            amd64) GO_ARCH="amd64" ;; \
+            arm64) GO_ARCH="arm64" ;; \
+            *) GO_ARCH="amd64" ;; \
+        esac \
+        && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" \
+        | tar -C /usr/local -xzf - \
+        && ln -sf /usr/local/go/bin/go /usr/local/bin/go \
+        && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
+    fi
+
+# Java
+RUN if [ "$INSTALL_JAVA" = "true" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends wget \
+        && rm -rf /var/lib/apt/lists/* \
+        && JAVA_VERSION=21 \
+        && case "${TARGETARCH}" in \
+            amd64) JAVA_ARCH="x64" ;; \
+            arm64) JAVA_ARCH="aarch64" ;; \
+            *) JAVA_ARCH="x64" ;; \
+        esac \
+        && mkdir -p /opt/java \
+        && cd /opt/java \
+        && wget -q "https://github.com/adoptium/temurin${JAVA_VERSION}-binaries/releases/download/jdk-${JAVA_VERSION}.0.2%2B13/OpenJDK${JAVA_VERSION}U-jdk_${JAVA_ARCH}_linux_hotspot_${JAVA_VERSION}.0.2_13.tar.gz" \
+        && tar -xzf OpenJDK*.tar.gz \
+        && rm OpenJDK*.tar.gz \
+        && mv jdk* jdk \
+        && ln -sf /opt/java/jdk/bin/* /usr/local/bin/ \
+        && MAVEN_VERSION=3.9.6 \
+        && curl -fsSL "https://dlcdn.apache.org/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+        | tar -C /opt -xzf - \
+        && ln -sf /opt/apache-maven-${MAVEN_VERSION}/bin/mvn /usr/local/bin/mvn \
+        && GRADLE_VERSION=8.5 \
+        && curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip \
+        && unzip -q /tmp/gradle.zip -d /opt \
+        && rm /tmp/gradle.zip \
+        && ln -sf /opt/gradle-${GRADLE_VERSION}/bin/gradle /usr/local/bin/gradle; \
+    fi
+
+# Rust
+RUN if [ "$INSTALL_RUST" = "true" ]; then \
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+        && . "$HOME/.cargo/env" \
+        && rustup component add rustfmt clippy; \
+    fi
+
+# Docker CLI
+RUN if [ "$INSTALL_DOCKER" = "true" ]; then \
+        curl -fsSL https://download.docker.com/linux/debian/gpg \
+        | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+        && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian bookworm stable" \
+        | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+        && apt-get update \
+        && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# GitHub CLI
+RUN if [ "$INSTALL_GH_CLI" = "true" ]; then \
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+        && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+        && apt-get update \
+        && apt-get install -y gh \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code mcp-remote
+
+# =============================================================================
+# Tool Backends (sidecar-exec, ssh-exec)
+# =============================================================================
+# These are always included — runtime wrapper generation in entrypoint.sh
+# decides which backend to use based on BUILD_SIDECARS / SSH_HOST env vars.
+
+COPY sidecar-exec /opt/sidecar/sidecar-exec
+COPY ssh-exec /opt/sidecar/ssh-exec
+RUN chmod +x /opt/sidecar/sidecar-exec /opt/sidecar/ssh-exec \
+    && mkdir -p /opt/sidecar/wrappers
+
+ENV PATH="/opt/sidecar/wrappers:${PATH}"
+
+# =============================================================================
+# User Setup
+# =============================================================================
+
+# Remove existing node user if present (node:* base images have UID 1000)
+RUN if id -u node >/dev/null 2>&1; then \
+        userdel -r node 2>/dev/null || true; \
+    fi
+
+# Create agent user
+RUN groupadd -g ${AGENT_GID} ${AGENT_USER} \
+    && useradd -m -s /bin/bash -u ${AGENT_UID} -g ${AGENT_GID} ${AGENT_USER}
+
+# If Rust was installed, copy for agent user
+RUN if [ "$INSTALL_RUST" = "true" ] && [ -d /root/.cargo ]; then \
+        cp -r /root/.cargo /home/${AGENT_USER}/.cargo \
+        && cp -r /root/.rustup /home/${AGENT_USER}/.rustup 2>/dev/null || true \
+        && chown -R ${AGENT_USER}:${AGENT_USER} /home/${AGENT_USER}/.cargo \
+        && echo 'export PATH="/home/'${AGENT_USER}'/.cargo/bin:${PATH}"' >> /home/${AGENT_USER}/.bashrc; \
+    fi
+
+# Setup directories
+RUN mkdir -p /home/${AGENT_USER}/.claude /workspace \
+    && chown -R ${AGENT_USER}:${AGENT_USER} /home/${AGENT_USER} /workspace
+
+USER ${AGENT_USER}
+WORKDIR /home/${AGENT_USER}
+
+# =============================================================================
+# Runtime Environment
+# =============================================================================
+
+ENV GH_TOKEN="" \
+    TASK_ID="" \
+    STEP_NAME="" \
+    REPO_PATH="/workspace"
+
+# Copy and setup entrypoint
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["/bin/bash"]

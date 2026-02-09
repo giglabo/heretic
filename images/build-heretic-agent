@@ -1,0 +1,1444 @@
+#!/usr/bin/env bash
+#
+# Build Heretic Agent Docker Image
+#
+# A unified build script for creating agent images with configurable tools and agent types.
+# Supports: Claude, Copilot, OpenCode, Gemini
+# Supports both local development (full terminal) and production/K8s (slim) variants.
+#
+# Usage: ./build-heretic-agent [OPTIONS]
+#
+# Examples:
+#   ./build-heretic-agent --agent claude                   # Build Claude agent
+#   ./build-heretic-agent --agent copilot --agent gemini   # Build multiple agents
+#   ./build-heretic-agent --agent all                      # Build all agents
+#   ./build-heretic-agent --base ubuntu:22.04              # Use Ubuntu base
+#   ./build-heretic-agent --with-python --with-node        # Include Python + Node
+#   ./build-heretic-agent --with-all --arch arm64          # All tools for ARM64
+#   ./build-heretic-agent --push --registry ghcr.io/myrepo # Build and push
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# =============================================================================
+# Default Configuration
+# =============================================================================
+
+# Agent types - can specify multiple (claude, copilot, opencode, gemini, all)
+# Default to claude if no agents specified
+AGENT_TYPES=()
+
+# Combined mode - install all agents in one image
+COMBINED="false"
+
+# Image settings
+IMAGE_NAME="${IMAGE_NAME:-heretic-agent}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+REGISTRY="${REGISTRY:-}"
+DO_PUSH="false"
+NO_CACHE="false"
+
+# Architecture settings
+ARCH="${ARCH:-}"  # Empty = current platform, or: amd64, arm64, both
+
+# Base image - can be overridden for different use cases
+# - node:22-bookworm-slim  : Slim, good for K8s/production
+# - ubuntu:22.04           : Full terminal, good for local dev
+# - debian:bookworm        : Middle ground
+DEFAULT_BASE_IMAGE="node:22-bookworm-slim"
+BASE_IMAGE="${BASE_IMAGE:-$DEFAULT_BASE_IMAGE}"
+
+# Tool flags (all false by default - opt-in)
+WITH_PYTHON="false"
+PYTHON_VERSION="3.13"  # Default to Python 3.13, or specify "3.12", "3.11", etc.
+WITH_NODE="false"      # Node is included in node:* base images
+NODE_VERSION="22"      # Default to Node.js 22.x, or specify "20", "18", etc.
+WITH_GO="false"
+GO_VERSION="1.23.4"    # Default to Go 1.23.4, or specify "1.22.0", "1.21.5", etc.
+WITH_JAVA="false"
+JAVA_VERSION="21"      # Default to Java 21, or specify "17", "11", etc.
+WITH_RUST="false"
+RUST_VERSION="stable"  # Default to stable, or specify "nightly", "beta", "1.75", etc.
+WITH_DOCKER="false"    # Docker CLI for DinD/DooD
+WITH_GITHUB_CLI="true" # gh CLI is almost always needed
+
+# Special flag to enable everything
+WITH_ALL="false"
+
+# Agent configuration
+AGENT_USER="${AGENT_USER:-agent}"
+AGENT_UID="${AGENT_UID:-1000}"
+AGENT_GID="${AGENT_GID:-1000}"
+
+# =============================================================================
+# Help
+# =============================================================================
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Build Heretic Agent Docker image with configurable tools and agent types.
+
+AGENT OPTIONS:
+    --agent TYPE            Agent type: claude, copilot, opencode, gemini, all
+                            Can be specified multiple times to build multiple agents
+                            (default: claude)
+    --combined              Install all specified agents in a single image
+                            (default: build separate images per agent)
+
+IMAGE OPTIONS:
+    -n, --name NAME         Image name (default: heretic-agent)
+    -t, --tag TAG           Image tag (default: latest)
+    -r, --registry REG      Registry prefix (e.g., ghcr.io/username)
+    -p, --push              Push image after build
+    --no-cache              Build without using Docker cache
+    --dry-run               Print Dockerfile and exit without building
+
+ARCHITECTURE OPTIONS:
+    -a, --arch ARCH         Architecture: amd64, arm64, or both (default: current)
+
+BASE IMAGE OPTIONS:
+    --base IMAGE            Base image (default: $DEFAULT_BASE_IMAGE)
+                            Recommended:
+                            - node:22-bookworm-slim  : Slim, for K8s/production
+                            - ubuntu:22.04           : Full terminal, for local dev
+                            - debian:bookworm-slim   : Middle ground
+
+TOOL OPTIONS (all disabled by default):
+    --with-python           Include Python 3, pip, poetry, pytest, black, ruff, mypy
+                            (default version: 3.13)
+    --python-version VER    Specify Python version: 3.11, 3.12, 3.13 (default: 3.13)
+                            Automatically enables --with-python
+    --with-node             Include Node.js (npm, yarn, pnpm) - usually already in base
+                            (default version: 22)
+    --node-version VER      Specify Node.js version: 18, 20, 22 (default: 22)
+                            Automatically enables --with-node
+    --with-go               Include Go compiler and toolchain
+                            (default version: 1.23.4)
+    --go-version VER        Specify Go version: 1.21.5, 1.22.0, 1.23.4 (default: 1.23.4)
+                            Automatically enables --with-go
+    --with-java             Include Java (Eclipse Temurin)
+                            (default version: 21)
+    --java-version VER      Specify Java version: 11, 17, 21 (default: 21)
+                            Automatically enables --with-java
+    --with-rust             Include Rust, Cargo
+                            (default version: stable)
+    --rust-version VER      Specify Rust version: stable, nightly, beta, 1.75 (default: stable)
+                            Automatically enables --with-rust
+    --with-docker           Include Docker CLI (for Docker socket mount / DinD)
+    --with-github-cli       Include GitHub CLI (gh) - enabled by default
+
+SIDECAR WRAPPER OPTIONS (DEPRECATED):
+    --with-sidecar-*        No-op. Wrappers are now generated at runtime.
+                            Set BUILD_SIDECARS env var or SSH_HOST at container start.
+
+OTHER OPTIONS:
+    --with-all              Enable ALL built-in tools (not sidecar wrappers)
+
+AGENT OPTIONS:
+    --agent-user USER       Agent username (default: agent)
+    --agent-uid UID         Agent user ID (default: 1000)
+    --agent-gid GID         Agent group ID (default: 1000)
+
+ENVIRONMENT VARIABLES:
+    AGENT_TYPE              Default agent type
+    IMAGE_NAME              Default image name
+    IMAGE_TAG               Default image tag
+    REGISTRY                Default registry
+    BASE_IMAGE              Default base image
+
+AGENT TYPES:
+    claude                  Claude Code CLI (@anthropic-ai/claude-code)
+    copilot                 GitHub Copilot CLI (@github/copilot)
+    opencode                OpenCode CLI (opencode-ai)
+    gemini                  Gemini CLI (@google/gemini-cli)
+    all                     Build separate images for all agent types
+
+EXAMPLES:
+    # Basic build with Claude agent
+    $(basename "$0") --agent claude
+
+    # Build multiple specific agents (separate images)
+    $(basename "$0") --agent copilot --agent gemini
+
+    # Build multiple agents in ONE image (combined)
+    $(basename "$0") --agent claude --agent copilot --combined
+
+    # Build all agent types
+    $(basename "$0") --agent all
+
+    # Local development with full terminal and Python
+    $(basename "$0") --agent claude --base ubuntu:22.04 --with-python --with-docker
+
+    # Build multiple agents with all tools (combined image)
+    $(basename "$0") --agent claude --agent copilot --with-all --combined
+
+    # Multi-arch build with all tools, push to registry
+    $(basename "$0") --agent gemini --with-all --arch both --push --registry ghcr.io/myorg
+
+    # ARM64 build for Apple Silicon
+    $(basename "$0") --agent copilot --arch arm64 --with-python --with-node
+
+EOF
+    exit 0
+}
+
+# =============================================================================
+# Parse Arguments
+# =============================================================================
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        # Agent type (can be specified multiple times)
+        --agent)
+            AGENT_TYPES+=("$2")
+            shift 2
+            ;;
+        # Combined mode - install all agents in one image
+        --combined)
+            COMBINED="true"
+            shift
+            ;;
+        # Image options
+        -n|--name)
+            IMAGE_NAME="$2"
+            shift 2
+            ;;
+        -t|--tag)
+            IMAGE_TAG="$2"
+            shift 2
+            ;;
+        -r|--registry)
+            REGISTRY="$2"
+            shift 2
+            ;;
+        -p|--push)
+            DO_PUSH="true"
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN="true"
+            shift
+            ;;
+        --no-cache)
+            NO_CACHE="true"
+            shift
+            ;;
+        # Architecture
+        -a|--arch)
+            ARCH="$2"
+            shift 2
+            ;;
+        # Base image
+        --base)
+            BASE_IMAGE="$2"
+            shift 2
+            ;;
+        # Tool flags
+        --with-python)
+            WITH_PYTHON="true"
+            shift
+            ;;
+        --python-version)
+            PYTHON_VERSION="$2"
+            WITH_PYTHON="true"  # Automatically enable Python
+            shift 2
+            ;;
+        --with-node)
+            WITH_NODE="true"
+            shift
+            ;;
+        --node-version)
+            NODE_VERSION="$2"
+            WITH_NODE="true"  # Automatically enable Node.js
+            shift 2
+            ;;
+        --with-go)
+            WITH_GO="true"
+            shift
+            ;;
+        --go-version)
+            GO_VERSION="$2"
+            WITH_GO="true"  # Automatically enable Go
+            shift 2
+            ;;
+        --with-java)
+            WITH_JAVA="true"
+            shift
+            ;;
+        --java-version)
+            JAVA_VERSION="$2"
+            WITH_JAVA="true"  # Automatically enable Java
+            shift 2
+            ;;
+        --with-rust)
+            WITH_RUST="true"
+            shift
+            ;;
+        --rust-version)
+            RUST_VERSION="$2"
+            WITH_RUST="true"  # Automatically enable Rust
+            shift 2
+            ;;
+        --with-docker)
+            WITH_DOCKER="true"
+            shift
+            ;;
+        --with-github-cli)
+            WITH_GITHUB_CLI="true"
+            shift
+            ;;
+        --with-sidecar-python|--with-sidecar-node|--with-sidecar-go|--with-sidecar-java|--with-sidecar-rust)
+            echo "WARNING: $1 is deprecated and will be ignored. Wrappers are now generated at runtime via BUILD_SIDECARS or SSH_HOST env vars." >&2
+            shift
+            ;;
+        --with-all)
+            WITH_ALL="true"
+            shift
+            ;;
+        # Agent options
+        --agent-user)
+            AGENT_USER="$2"
+            shift 2
+            ;;
+        --agent-uid)
+            AGENT_UID="$2"
+            shift 2
+            ;;
+        --agent-gid)
+            AGENT_GID="$2"
+            shift 2
+            ;;
+        # Help
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            ;;
+    esac
+done
+
+# Apply --with-all
+if [[ "$WITH_ALL" == "true" ]]; then
+    WITH_PYTHON="true"
+    WITH_NODE="true"
+    WITH_GO="true"
+    WITH_JAVA="true"
+    WITH_RUST="true"
+    WITH_DOCKER="true"
+    WITH_GITHUB_CLI="true"
+fi
+
+# Default to claude if no agents specified
+if [[ ${#AGENT_TYPES[@]} -eq 0 ]]; then
+    AGENT_TYPES=("claude")
+fi
+
+# Expand "all" to all agent types
+declare -a EXPANDED_AGENTS=()
+for agent in "${AGENT_TYPES[@]}"; do
+    case "$agent" in
+        all)
+            EXPANDED_AGENTS+=(claude copilot opencode gemini)
+            ;;
+        claude|copilot|opencode|gemini)
+            EXPANDED_AGENTS+=("$agent")
+            ;;
+        *)
+            echo "Error: Invalid agent type '$agent'. Use: claude, copilot, opencode, gemini, or all"
+            exit 1
+            ;;
+    esac
+done
+
+# Remove duplicates
+AGENT_TYPES=($(printf '%s\n' "${EXPANDED_AGENTS[@]}" | sort -u))
+
+# =============================================================================
+# Generate Dockerfile
+# =============================================================================
+
+generate_dockerfile() {
+    local agent_type="$1"
+    local combined_mode="${2:-false}"
+    local -a all_agents=()
+
+    # In combined mode, use all AGENT_TYPES; otherwise just the one specified
+    if [[ "$combined_mode" == "true" ]]; then
+        all_agents=("${AGENT_TYPES[@]}")
+    else
+        all_agents=("$agent_type")
+    fi
+
+    cat <<'DOCKERFILE_HEADER'
+# Heretic Agent Image
+# Auto-generated by build-heretic-agent
+#
+# This is a unified agent image with configurable tools and agent types:
+# - Local development (full terminal, all tools)
+# - Production/K8s (slim, sidecar-based tools)
+#
+
+DOCKERFILE_HEADER
+
+    echo "ARG BASE_IMAGE=node:22-bookworm-slim"
+    echo "FROM \${BASE_IMAGE}"
+    echo ""
+    echo "ARG TARGETARCH"
+    echo "ARG AGENT_USER=${AGENT_USER}"
+    echo "ARG AGENT_UID=${AGENT_UID}"
+    echo "ARG AGENT_GID=${AGENT_GID}"
+    echo "ARG AGENT_TYPE=${agent_type}"
+    echo ""
+
+    # Labels
+    cat <<EOF
+LABEL org.opencontainers.image.title="Heretic Agent (${agent_type})"
+LABEL org.opencontainers.image.description="Unified agent with configurable tools (agent: ${agent_type})"
+LABEL org.opencontainers.image.vendor="Cloud Agents"
+
+ENV DEBIAN_FRONTEND=noninteractive \\
+    PYTHONUNBUFFERED=1 \\
+    PYTHONDONTWRITEBYTECODE=1 \\
+    PIP_NO_CACHE_DIR=1 \\
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \\
+    AGENT_TYPE="${agent_type}"
+
+EOF
+
+    # Install base dependencies
+    cat <<'EOF'
+# Install base dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    jq \
+    xz-utils \
+    gnupg \
+    unzip \
+    openssh-client \
+    vim \
+    && rm -rf /var/lib/apt/lists/*
+
+EOF
+
+    # For Ubuntu base images, install and configure locales
+    if [[ "$BASE_IMAGE" =~ ^ubuntu: ]]; then
+        cat <<'EOF'
+# Configure locales for Ubuntu
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    locales \
+    && rm -rf /var/lib/apt/lists/* \
+    && locale-gen en_US.UTF-8 \
+    && update-locale LANG=en_US.UTF-8
+
+ENV LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8
+
+EOF
+    fi
+
+    # Node.js - required for agent CLIs (npm packages)
+    if [[ "$BASE_IMAGE" =~ ^node: ]]; then
+        # Node base image - just enable corepack
+        cat <<'EOF'
+# Enable corepack for pnpm/yarn (Node base image)
+RUN corepack enable
+
+EOF
+    else
+        # Non-Node base image - install Node.js (required for agent CLIs)
+        cat <<EOF
+# Install Node.js ${NODE_VERSION}.x (required for agent CLIs)
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \\
+    && apt-get install -y nodejs \\
+    && rm -rf /var/lib/apt/lists/*
+
+# Enable corepack for pnpm/yarn
+RUN corepack enable
+
+EOF
+    fi
+
+    # Python
+    if [[ "$WITH_PYTHON" == "true" ]]; then
+        if [[ -n "$PYTHON_VERSION" ]] && [[ "$PYTHON_VERSION" != "default" ]]; then
+            # Install specific Python version using deadsnakes PPA
+            cat <<EOF
+# Install Python ${PYTHON_VERSION} from deadsnakes PPA
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    software-properties-common \\
+    curl \\
+    && add-apt-repository -y ppa:deadsnakes/ppa \\
+    && apt-get update \\
+    && apt-get install -y --no-install-recommends \\
+    python${PYTHON_VERSION} \\
+    python${PYTHON_VERSION}-venv \\
+    python${PYTHON_VERSION}-dev \\
+    && rm -rf /var/lib/apt/lists/* \\
+    && ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3 \\
+    && ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python \\
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
+
+# Install Python development tools
+RUN pip3 install --break-system-packages --no-cache-dir \\
+    poetry \\
+    pytest \\
+    black \\
+    ruff \\
+    mypy \\
+    || pip3 install --no-cache-dir \\
+    poetry \\
+    pytest \\
+    black \\
+    ruff \\
+    mypy
+
+EOF
+        else
+            # Install default Python version from distro
+            cat <<'EOF'
+# Install Python 3 and tools (distro default)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/bin/python
+
+# Install Python development tools
+RUN pip3 install --break-system-packages --no-cache-dir \
+    poetry \
+    pytest \
+    black \
+    ruff \
+    mypy \
+    || pip3 install --no-cache-dir \
+    poetry \
+    pytest \
+    black \
+    ruff \
+    mypy
+
+EOF
+        fi
+    fi
+
+    # Go
+    if [[ "$WITH_GO" == "true" ]]; then
+        cat <<EOF
+# Install Go ${GO_VERSION}
+RUN case "\${TARGETARCH}" in \\
+        amd64) GO_ARCH="amd64" ;; \\
+        arm64) GO_ARCH="arm64" ;; \\
+        *) GO_ARCH="amd64" ;; \\
+    esac \\
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-\${GO_ARCH}.tar.gz" \\
+    | tar -C /usr/local -xzf - \\
+    && ln -sf /usr/local/go/bin/go /usr/local/bin/go \\
+    && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+
+ENV PATH="/usr/local/go/bin:\${PATH}"
+
+EOF
+    fi
+
+    # Java
+    if [[ "$WITH_JAVA" == "true" ]]; then
+        cat <<EOF
+# Install Java ${JAVA_VERSION} (Eclipse Temurin)
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    wget \\
+    && rm -rf /var/lib/apt/lists/*
+
+RUN case "\${TARGETARCH}" in \\
+        amd64) JAVA_ARCH="x64" ;; \\
+        arm64) JAVA_ARCH="aarch64" ;; \\
+        *) JAVA_ARCH="x64" ;; \\
+    esac \\
+    && mkdir -p /opt/java \\
+    && cd /opt/java \\
+    && wget -q "https://github.com/adoptium/temurin${JAVA_VERSION}-binaries/releases/download/jdk-${JAVA_VERSION}.0.2%2B13/OpenJDK${JAVA_VERSION}U-jdk_\${JAVA_ARCH}_linux_hotspot_${JAVA_VERSION}.0.2_13.tar.gz" \\
+    && tar -xzf OpenJDK*.tar.gz \\
+    && rm OpenJDK*.tar.gz \\
+    && mv jdk* jdk \\
+    && ln -sf /opt/java/jdk/bin/* /usr/local/bin/
+
+ENV JAVA_HOME="/opt/java/jdk"
+ENV PATH="\${JAVA_HOME}/bin:\${PATH}"
+
+# Install Maven 3.9.6
+RUN curl -fsSL "https://dlcdn.apache.org/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz" \\
+    | tar -C /opt -xzf - \\
+    && ln -sf /opt/apache-maven-3.9.6/bin/mvn /usr/local/bin/mvn
+
+# Install Gradle 8.5
+RUN curl -fsSL "https://services.gradle.org/distributions/gradle-8.5-bin.zip" -o /tmp/gradle.zip \\
+    && unzip -q /tmp/gradle.zip -d /opt \\
+    && rm /tmp/gradle.zip \\
+    && ln -sf /opt/gradle-8.5/bin/gradle /usr/local/bin/gradle
+
+EOF
+    fi
+
+    # Rust
+    if [[ "$WITH_RUST" == "true" ]]; then
+        cat <<EOF
+# Install Rust ${RUST_VERSION}
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION}
+ENV PATH="/root/.cargo/bin:\${PATH}"
+RUN rustup component add rustfmt clippy
+
+EOF
+    fi
+
+    # Docker CLI (for DinD/DooD)
+    if [[ "$WITH_DOCKER" == "true" ]]; then
+        cat <<'EOF'
+# Install Docker CLI for Docker-in-Docker / Docker-outside-of-Docker
+RUN . /etc/os-release \
+    && curl -fsSL "https://download.docker.com/linux/${ID}/gpg" \
+    | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/${ID} ${VERSION_CODENAME} stable" \
+    | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+EOF
+    fi
+
+    # GitHub CLI
+    if [[ "$WITH_GITHUB_CLI" == "true" ]]; then
+        cat <<'EOF'
+# Install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+EOF
+    fi
+
+    # Agent-specific CLI installation
+    if [[ "$combined_mode" == "true" ]]; then
+        echo "# Install Agent CLIs (Combined Mode)"
+        local npm_packages=()
+        for agent in "${all_agents[@]}"; do
+            case "$agent" in
+                claude)
+                    npm_packages+=("@anthropic-ai/claude-code" "mcp-remote")
+                    ;;
+                copilot)
+                    npm_packages+=("@github/copilot")
+                    ;;
+                opencode)
+                    npm_packages+=("opencode-ai")
+                    ;;
+                gemini)
+                    npm_packages+=("@google/gemini-cli" "mcp-remote")
+                    ;;
+            esac
+        done
+        # Remove duplicates and install
+        local unique_packages=($(printf '%s\n' "${npm_packages[@]}" | sort -u))
+        echo "RUN npm install -g ${unique_packages[*]}"
+        echo ""
+    else
+        # Single agent mode
+        case "$agent_type" in
+            claude)
+                cat <<'EOF'
+# Install Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code mcp-remote
+
+EOF
+                ;;
+            copilot)
+                cat <<'EOF'
+# Install GitHub Copilot CLI
+RUN npm install -g @github/copilot
+
+EOF
+                ;;
+            opencode)
+                cat <<'EOF'
+# Install OpenCode CLI
+RUN npm install -g opencode-ai
+
+EOF
+                ;;
+            gemini)
+                cat <<'EOF'
+# Install Gemini CLI
+RUN npm install -g @google/gemini-cli mcp-remote
+
+EOF
+                ;;
+        esac
+    fi
+
+    # Tool backends (sidecar-exec, ssh-exec) — always included
+    cat <<'EOF'
+# Tool backends — runtime wrapper generation in entrypoint.sh
+COPY sidecar-exec /opt/sidecar/sidecar-exec
+COPY ssh-exec /opt/sidecar/ssh-exec
+RUN chmod +x /opt/sidecar/sidecar-exec /opt/sidecar/ssh-exec \
+    && mkdir -p /opt/sidecar/wrappers
+ENV PATH="/opt/sidecar/wrappers:${PATH}"
+
+EOF
+
+    # Create agent user
+    cat <<EOF
+# Create agent user
+RUN (userdel -r node 2>/dev/null || true) \
+    && groupadd -g \${AGENT_GID} \${AGENT_USER} \
+    && useradd -m -s /bin/bash -u \${AGENT_UID} -g \${AGENT_GID} \${AGENT_USER}
+
+EOF
+
+    # If Rust was installed as root, ensure agent can use it
+    if [[ "$WITH_RUST" == "true" ]]; then
+        cat <<EOF
+# Copy Rust installation for agent user
+RUN cp -r /root/.cargo /home/\${AGENT_USER}/.cargo \
+    && cp -r /root/.rustup /home/\${AGENT_USER}/.rustup 2>/dev/null || true \
+    && chown -R \${AGENT_USER}:\${AGENT_USER} /home/\${AGENT_USER}/.cargo \
+    && echo 'export PATH="/home/\${AGENT_USER}/.cargo/bin:\${PATH}"' >> /home/\${AGENT_USER}/.bashrc
+
+EOF
+    fi
+
+    # Setup directories based on agent type(s)
+    if [[ "$combined_mode" == "true" ]]; then
+        cat <<EOF
+# Setup directories for all agents (Combined Mode)
+RUN mkdir -p /workspace /home/\${AGENT_USER}/.claude /home/\${AGENT_USER}/.config/opencode /home/\${AGENT_USER}/.gemini \
+    && chown -R \${AGENT_USER}:\${AGENT_USER} /home/\${AGENT_USER} /workspace
+
+EOF
+    else
+        case "$agent_type" in
+            claude)
+                cat <<EOF
+# Setup Claude-specific directories
+RUN mkdir -p /home/\${AGENT_USER}/.claude /workspace \
+    && chown -R \${AGENT_USER}:\${AGENT_USER} /home/\${AGENT_USER} /workspace
+
+EOF
+                ;;
+            opencode)
+                cat <<EOF
+# Setup OpenCode-specific directories
+RUN mkdir -p /home/\${AGENT_USER}/.config/opencode /workspace \
+    && chown -R \${AGENT_USER}:\${AGENT_USER} /home/\${AGENT_USER} /workspace
+
+EOF
+                ;;
+            gemini)
+                cat <<EOF
+# Setup Gemini-specific directories
+RUN mkdir -p /home/\${AGENT_USER}/.gemini /workspace \
+    && chown -R \${AGENT_USER}:\${AGENT_USER} /home/\${AGENT_USER} /workspace
+
+EOF
+                ;;
+            copilot)
+                cat <<EOF
+# Setup workspace
+RUN mkdir -p /workspace \
+    && chown -R \${AGENT_USER}:\${AGENT_USER} /home/\${AGENT_USER} /workspace
+
+EOF
+                ;;
+        esac
+    fi
+
+    cat <<EOF
+USER \${AGENT_USER}
+WORKDIR /home/\${AGENT_USER}
+
+EOF
+
+    # Environment variables for runtime
+    cat <<'EOF'
+# Runtime environment variables
+ENV API_TIMEOUT_MS="3000000"
+ENV GH_TOKEN=""
+ENV TASK_ID=""
+ENV STEP_NAME=""
+ENV REPO_PATH="/workspace"
+ENV PROMPT_FILE=""
+ENV AGENT_ARGS=""
+ENV AGENT_OUTPUT_FORMAT="stream-json"
+
+EOF
+
+    # Entrypoint
+    cat <<'EOF'
+# Default command - interactive shell
+# For workflow execution, the orchestrator overrides this with entrypoint.sh
+CMD ["/bin/bash"]
+EOF
+}
+
+# =============================================================================
+# Generate Entrypoint Script
+# =============================================================================
+
+generate_entrypoint() {
+    local agent_type="$1"
+
+    cat <<'EOF'
+#!/bin/bash
+#
+# Universal Entrypoint for Heretic Agent
+#
+# Supports two modes:
+# 1. Interactive mode (default): Starts a shell for local development
+# 2. Workflow mode: Executes agent with prompt when PROMPT_FILE is set
+#
+
+set -e
+
+# =============================================================================
+# Runtime Tool Wrappers
+# =============================================================================
+
+setup_tool_wrappers() {
+    declare -A RUNTIME_COMMANDS=(
+        [node]="npm npx pnpm yarn node"
+        [python]="python python3 pip pip3 poetry pytest ruff black mypy"
+        [java]="java javac mvn gradle"
+        [go]="go gofmt"
+        [rust]="cargo rustc rustfmt clippy"
+    )
+
+    local WRAPPER_DIR="/opt/sidecar/wrappers"
+
+    if [[ -d "$WRAPPER_DIR" ]]; then
+        rm -f "$WRAPPER_DIR"/*
+    else
+        mkdir -p "$WRAPPER_DIR"
+    fi
+
+    declare -A SIDECAR_RUNTIMES=()
+    if [[ -n "${BUILD_SIDECARS:-}" ]] && [[ "$BUILD_SIDECARS" != "{}" ]]; then
+        while IFS= read -r rt; do
+            [[ -n "$rt" ]] && SIDECAR_RUNTIMES["$rt"]=1
+        done < <(echo "$BUILD_SIDECARS" | jq -r 'keys[]' 2>/dev/null || true)
+    fi
+
+    local has_ssh="false"
+    [[ -n "${SSH_HOST:-}" ]] && has_ssh="true"
+
+    if [[ ${#SIDECAR_RUNTIMES[@]} -eq 0 ]] && [[ "$has_ssh" == "false" ]]; then
+        return 0
+    fi
+
+    local wrapper_count=0
+
+    for runtime in "${!RUNTIME_COMMANDS[@]}"; do
+        for cmd in ${RUNTIME_COMMANDS[$runtime]}; do
+            local clean_path
+            clean_path=$(echo "$PATH" | tr ':' '\n' | grep -v "$WRAPPER_DIR" | tr '\n' ':' | sed 's/:$//')
+            if PATH="$clean_path" command -v "$cmd" >/dev/null 2>&1; then
+                continue
+            fi
+
+            if [[ -n "${SIDECAR_RUNTIMES[$runtime]+x}" ]]; then
+                cat > "$WRAPPER_DIR/$cmd" <<WRAPPER
+#!/bin/bash
+exec /opt/sidecar/sidecar-exec "$runtime" "$cmd" "\$@"
+WRAPPER
+                chmod +x "$WRAPPER_DIR/$cmd"
+                wrapper_count=$((wrapper_count + 1))
+                continue
+            fi
+
+            if [[ "$has_ssh" == "true" ]]; then
+                cat > "$WRAPPER_DIR/$cmd" <<WRAPPER
+#!/bin/bash
+exec /opt/sidecar/ssh-exec "$cmd" "\$@"
+WRAPPER
+                chmod +x "$WRAPPER_DIR/$cmd"
+                wrapper_count=$((wrapper_count + 1))
+                continue
+            fi
+        done
+    done
+
+    if [[ $wrapper_count -gt 0 ]]; then
+        echo "Tool wrappers: $wrapper_count commands configured"
+    fi
+}
+
+setup_tool_wrappers
+
+# =============================================================================
+# Mode Detection
+# =============================================================================
+
+# If no PROMPT_FILE set, run interactive shell (local development)
+if [[ -z "${PROMPT_FILE:-}" ]]; then
+    echo "=== Heretic Agent (Interactive Mode) ==="
+    echo "Agent type: ${AGENT_TYPE:-unknown}"
+    echo "Tools available:"
+    command -v python3 >/dev/null 2>&1 && echo "  - Python: $(python3 --version 2>&1 | head -1)"
+    command -v node >/dev/null 2>&1 && echo "  - Node.js: $(node --version)"
+    command -v go >/dev/null 2>&1 && echo "  - Go: $(go version)"
+    command -v java >/dev/null 2>&1 && echo "  - Java: $(java -version 2>&1 | head -1)"
+    command -v rustc >/dev/null 2>&1 && echo "  - Rust: $(rustc --version)"
+    command -v docker >/dev/null 2>&1 && echo "  - Docker CLI: $(docker --version)"
+    command -v gh >/dev/null 2>&1 && echo "  - GitHub CLI: $(gh --version | head -1)"
+    echo ""
+    echo "Agent CLI:"
+    case "${AGENT_TYPE:-claude}" in
+        claude)
+            command -v claude >/dev/null 2>&1 && echo "  - Claude: $(claude --version 2>&1 | head -1)" || echo "  - Claude: not found"
+            ;;
+        copilot)
+            command -v copilot >/dev/null 2>&1 && echo "  - Copilot: installed" || echo "  - Copilot: not found"
+            ;;
+        opencode)
+            command -v opencode >/dev/null 2>&1 && echo "  - OpenCode: installed" || echo "  - OpenCode: not found"
+            ;;
+        gemini)
+            command -v gemini >/dev/null 2>&1 && echo "  - Gemini: installed" || echo "  - Gemini: not found"
+            ;;
+    esac
+    echo ""
+    echo "Working directory: $(pwd)"
+    echo ""
+    exec /bin/bash
+fi
+
+# =============================================================================
+# Workflow Mode
+# =============================================================================
+
+echo "=== Heretic Agent (Workflow Mode) ==="
+echo "Agent type: ${AGENT_TYPE:-claude}"
+echo "STEP_NAME: ${STEP_NAME:-not set}"
+echo "REPO_PATH: ${REPO_PATH:-not set}"
+echo "PROMPT_FILE: ${PROMPT_FILE}"
+echo "AGENT_OUTPUT_FORMAT: ${AGENT_OUTPUT_FORMAT:-stream-json}"
+echo ""
+
+# Validate prompt file
+if [[ ! -f "$PROMPT_FILE" ]]; then
+    echo "ERROR: Prompt file not found: $PROMPT_FILE"
+    exit 1
+fi
+
+# Read prompt content
+PROMPT_CONTENT=$(cat "$PROMPT_FILE")
+echo "Prompt length: ${#PROMPT_CONTENT} characters"
+echo ""
+
+# Configure git credentials if GH_TOKEN provided
+if [[ -n "${GH_TOKEN:-}" ]] || [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    TOKEN="${GH_TOKEN:-${GITHUB_TOKEN}}"
+    git config --global credential.helper store
+    echo "https://x-access-token:${TOKEN}@github.com" > ~/.git-credentials
+    echo "Git credentials configured"
+fi
+
+# Set git user info
+git config --global user.email "agent@cloud-agents.io"
+git config --global user.name "Heretic Agent"
+
+# Configure git hooks if available
+for hooks_path in "${REPO_PATH}/.githooks" "/workspace/.githooks"; do
+    if [[ -d "$hooks_path" ]]; then
+        git config --global core.hooksPath "$hooks_path"
+        echo "Git hooks configured: $hooks_path"
+        break
+    fi
+done
+
+# Setup agent-specific settings
+case "${AGENT_TYPE:-claude}" in
+    claude)
+        SETTINGS_SOURCE="${HERETIC_DIR:-/workspace/.heretic}/claude-settings.json"
+        if [[ -f "$SETTINGS_SOURCE" ]]; then
+            mkdir -p ~/.claude
+            cp "$SETTINGS_SOURCE" ~/.claude/settings.json
+            echo "Claude settings configured"
+        fi
+        ;;
+    opencode)
+        SETTINGS_SOURCE="${HERETIC_DIR:-/workspace/.heretic}/opencode.json"
+        if [[ -f "$SETTINGS_SOURCE" ]]; then
+            mkdir -p ~/.config/opencode
+            cp "$SETTINGS_SOURCE" ~/.config/opencode/config.json
+            echo "OpenCode settings configured"
+        fi
+        ;;
+    gemini)
+        # Gemini uses environment variables
+        if [[ -n "${GOOGLE_API_KEY:-}" ]]; then
+            echo "Gemini API key configured"
+        fi
+        ;;
+    copilot)
+        # Copilot uses GITHUB_TOKEN
+        if [[ -n "${GITHUB_TOKEN:-}" ]] || [[ -n "${GH_TOKEN:-}" ]]; then
+            echo "Copilot token configured"
+        fi
+        ;;
+esac
+
+# Process AGENT_ARGS (handles file: and exec: prefixes)
+declare -a PROCESSED_ARGS=()
+
+process_arg() {
+    local arg="$1"
+    if [[ "$arg" == file:* ]]; then
+        local filepath="${arg#file:}"
+        if [[ -f "$filepath" ]]; then
+            cat "$filepath"
+        else
+            echo "WARNING: File not found: $filepath" >&2
+            echo "$arg"
+        fi
+    elif [[ "$arg" == exec:* ]]; then
+        local cmd="${arg#exec:}"
+        eval "$cmd" 2>&1 || echo ""
+    else
+        echo "$arg"
+    fi
+}
+
+if [[ -n "${AGENT_ARGS:-}" ]]; then
+    eval "local -a raw_args=($AGENT_ARGS)"
+    for arg in "${raw_args[@]}"; do
+        processed=$(process_arg "$arg")
+        PROCESSED_ARGS+=("$processed")
+    done
+fi
+
+# Build agent command based on type
+declare -a AGENT_CMD=()
+
+case "${AGENT_TYPE:-claude}" in
+    claude)
+        AGENT_CMD=(claude --print)
+        OUTPUT_FORMAT="${AGENT_OUTPUT_FORMAT:-stream-json}"
+        AGENT_CMD+=(--output-format "$OUTPUT_FORMAT")
+        if [[ "$OUTPUT_FORMAT" == "stream-json" ]]; then
+            AGENT_CMD+=(--verbose)
+        fi
+        if [[ ${#PROCESSED_ARGS[@]} -gt 0 ]]; then
+            AGENT_CMD+=("${PROCESSED_ARGS[@]}")
+        fi
+        ;;
+    copilot)
+        AGENT_CMD=(copilot)
+        if [[ ${#PROCESSED_ARGS[@]} -gt 0 ]]; then
+            AGENT_CMD+=("${PROCESSED_ARGS[@]}")
+        fi
+        ;;
+    opencode)
+        AGENT_CMD=(opencode)
+        if [[ ${#PROCESSED_ARGS[@]} -gt 0 ]]; then
+            AGENT_CMD+=("${PROCESSED_ARGS[@]}")
+        fi
+        ;;
+    gemini)
+        AGENT_CMD=(gemini)
+        if [[ ${#PROCESSED_ARGS[@]} -gt 0 ]]; then
+            AGENT_CMD+=("${PROCESSED_ARGS[@]}")
+        fi
+        ;;
+    *)
+        echo "ERROR: Unknown agent type: ${AGENT_TYPE}"
+        exit 1
+        ;;
+esac
+
+echo "=== Starting ${AGENT_TYPE} Agent ==="
+echo "Command: ${AGENT_CMD[*]}"
+echo ""
+
+# Change to repo directory and execute
+cd "${REPO_PATH:-/workspace}"
+exec "${AGENT_CMD[@]}" "$PROMPT_CONTENT"
+EOF
+}
+
+# =============================================================================
+# Build Function
+# =============================================================================
+
+build_combined_agent() {
+    local current_full_name
+
+    if [[ -n "$REGISTRY" ]]; then
+        current_full_name="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+    else
+        current_full_name="${IMAGE_NAME}:${IMAGE_TAG}"
+    fi
+
+    echo "=== Building Combined Agent (${AGENT_TYPES[*]}) ==="
+    echo ""
+    echo "Configuration:"
+    echo "  Agent types:   ${AGENT_TYPES[*]}"
+    echo "  Image name:    ${current_full_name}"
+    echo "  Base image:    ${BASE_IMAGE}"
+    echo "  Architecture:  ${ARCH:-current platform}"
+    echo "  Push:          ${DO_PUSH}"
+    echo ""
+    echo "Tools:"
+    [[ "$WITH_PYTHON" == "true" ]] && echo "  Python:        ${PYTHON_VERSION}" || echo "  Python:        false"
+    if [[ "$BASE_IMAGE" =~ ^node: ]]; then
+        echo "  Node.js:       included in base (v22)"
+    elif [[ "$WITH_NODE" == "true" ]]; then
+        echo "  Node.js:       ${NODE_VERSION}.x"
+    else
+        echo "  Node.js:       false"
+    fi
+    [[ "$WITH_GO" == "true" ]] && echo "  Go:            ${GO_VERSION}" || echo "  Go:            false"
+    [[ "$WITH_JAVA" == "true" ]] && echo "  Java:          ${JAVA_VERSION}" || echo "  Java:          false"
+    [[ "$WITH_RUST" == "true" ]] && echo "  Rust:          ${RUST_VERSION}" || echo "  Rust:          false"
+    echo "  Docker CLI:    ${WITH_DOCKER}"
+    echo "  GitHub CLI:    ${WITH_GITHUB_CLI}"
+    echo "Tool backends:   sidecar-exec, ssh-exec (runtime wrappers)"
+    echo ""
+
+    # Create temporary build directory
+    local build_dir=$(mktemp -d)
+    trap "rm -rf $build_dir" EXIT
+
+    # Generate Dockerfile (combined mode)
+    local dockerfile_path="${build_dir}/Dockerfile"
+    generate_dockerfile "${AGENT_TYPES[0]}" "true" > "$dockerfile_path"
+
+    # Generate entrypoint script (use first agent as template)
+    local entrypoint_path="${build_dir}/entrypoint.sh"
+    generate_entrypoint "${AGENT_TYPES[0]}" > "$entrypoint_path"
+    chmod +x "$entrypoint_path"
+
+    # Copy tool backend scripts
+    local sidecar_exec_src="${SCRIPT_DIR}/../build-sidecars/client/shell/sidecar-exec"
+    if [[ -f "$sidecar_exec_src" ]]; then
+        cp "$sidecar_exec_src" "${build_dir}/sidecar-exec"
+    else
+        echo "WARNING: sidecar-exec not found at $sidecar_exec_src"
+        echo "         Creating stub script"
+        cat > "${build_dir}/sidecar-exec" <<'STUB'
+#!/bin/bash
+echo "Error: sidecar-exec not available" >&2
+exit 1
+STUB
+    fi
+    chmod +x "${build_dir}/sidecar-exec"
+
+    cp "${SCRIPT_DIR}/ssh-exec" "${build_dir}/ssh-exec"
+    chmod +x "${build_dir}/ssh-exec"
+
+    # Dry run - just print Dockerfile
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        echo "=== Generated Dockerfile (Combined Mode) ==="
+        cat "$dockerfile_path"
+        echo ""
+        echo "=== Generated entrypoint.sh ==="
+        cat "$entrypoint_path"
+        return 0
+    fi
+
+    # Determine platforms
+    local platforms=""
+    case "$ARCH" in
+        amd64|x86_64)
+            platforms="linux/amd64"
+            ;;
+        arm64|aarch64)
+            platforms="linux/arm64"
+            ;;
+        both|all)
+            platforms="linux/amd64,linux/arm64"
+            ;;
+        "")
+            platforms=""
+            ;;
+        *)
+            echo "Error: Invalid architecture '$ARCH'"
+            return 1
+            ;;
+    esac
+
+    # Build
+    echo "Building image..."
+    cd "$build_dir"
+
+    local build_args=(
+        --build-arg "BASE_IMAGE=${BASE_IMAGE}"
+        --build-arg "AGENT_USER=${AGENT_USER}"
+        --build-arg "AGENT_UID=${AGENT_UID}"
+        --build-arg "AGENT_GID=${AGENT_GID}"
+        --build-arg "AGENT_TYPE=combined"
+        --tag "$current_full_name"
+    )
+
+    if [[ "$NO_CACHE" == "true" ]]; then
+        build_args+=(--no-cache)
+    fi
+
+    if [[ -n "$platforms" ]]; then
+        build_args+=(--platform "$platforms")
+        if [[ "$DO_PUSH" == "true" ]]; then
+            echo "Mode: buildx with push"
+            docker buildx build "${build_args[@]}" --push -f Dockerfile .
+        else
+            echo "Mode: buildx local"
+            docker buildx build "${build_args[@]}" --load -f Dockerfile .
+        fi
+    else
+        echo "Mode: standard build (current platform)"
+        docker build "${build_args[@]}" -f Dockerfile .
+
+        if [[ "$DO_PUSH" == "true" ]] && [[ -n "$REGISTRY" ]]; then
+            echo "Pushing image..."
+            docker push "$current_full_name"
+        fi
+    fi
+
+    echo ""
+    echo "Build complete: $current_full_name"
+    echo ""
+    echo "Installed agents: ${AGENT_TYPES[*]}"
+    echo "Set AGENT_TYPE at runtime to select which agent to use"
+}
+
+build_agent() {
+    local agent_type="$1"
+    local image_suffix=""
+
+    if [[ "$agent_type" != "claude" ]]; then
+        image_suffix="-${agent_type}"
+    fi
+
+    local current_image_name="${IMAGE_NAME}${image_suffix}"
+    local current_full_name
+
+    if [[ -n "$REGISTRY" ]]; then
+        current_full_name="${REGISTRY}/${current_image_name}:${IMAGE_TAG}"
+    else
+        current_full_name="${current_image_name}:${IMAGE_TAG}"
+    fi
+
+    echo "=== Building ${agent_type} Agent ==="
+    echo ""
+    echo "Configuration:"
+    echo "  Agent type:    ${agent_type}"
+    echo "  Image name:    ${current_full_name}"
+    echo "  Base image:    ${BASE_IMAGE}"
+    echo "  Architecture:  ${ARCH:-current platform}"
+    echo "  Push:          ${DO_PUSH}"
+    echo ""
+    echo "Tools:"
+    [[ "$WITH_PYTHON" == "true" ]] && echo "  Python:        ${PYTHON_VERSION}" || echo "  Python:        false"
+    if [[ "$BASE_IMAGE" =~ ^node: ]]; then
+        echo "  Node.js:       included in base (v22)"
+    elif [[ "$WITH_NODE" == "true" ]]; then
+        echo "  Node.js:       ${NODE_VERSION}.x"
+    else
+        echo "  Node.js:       false"
+    fi
+    [[ "$WITH_GO" == "true" ]] && echo "  Go:            ${GO_VERSION}" || echo "  Go:            false"
+    [[ "$WITH_JAVA" == "true" ]] && echo "  Java:          ${JAVA_VERSION}" || echo "  Java:          false"
+    [[ "$WITH_RUST" == "true" ]] && echo "  Rust:          ${RUST_VERSION}" || echo "  Rust:          false"
+    echo "  Docker CLI:    ${WITH_DOCKER}"
+    echo "  GitHub CLI:    ${WITH_DOCKER}"
+    echo "Tool backends:   sidecar-exec, ssh-exec (runtime wrappers)"
+    echo ""
+
+    # Create temporary build directory
+    local build_dir=$(mktemp -d)
+    trap "rm -rf $build_dir" EXIT
+
+    # Generate Dockerfile
+    local dockerfile_path="${build_dir}/Dockerfile"
+    generate_dockerfile "$agent_type" "false" > "$dockerfile_path"
+
+    # Generate entrypoint script
+    local entrypoint_path="${build_dir}/entrypoint.sh"
+    generate_entrypoint "$agent_type" > "$entrypoint_path"
+    chmod +x "$entrypoint_path"
+
+    # Copy tool backend scripts
+    local sidecar_exec_src="${SCRIPT_DIR}/../build-sidecars/client/shell/sidecar-exec"
+    if [[ -f "$sidecar_exec_src" ]]; then
+        cp "$sidecar_exec_src" "${build_dir}/sidecar-exec"
+    else
+        echo "WARNING: sidecar-exec not found at $sidecar_exec_src"
+        echo "         Creating stub script"
+        cat > "${build_dir}/sidecar-exec" <<'STUB'
+#!/bin/bash
+echo "Error: sidecar-exec not available" >&2
+exit 1
+STUB
+    fi
+    chmod +x "${build_dir}/sidecar-exec"
+
+    cp "${SCRIPT_DIR}/ssh-exec" "${build_dir}/ssh-exec"
+    chmod +x "${build_dir}/ssh-exec"
+
+    # Dry run - just print Dockerfile
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        echo "=== Generated Dockerfile for ${agent_type} ==="
+        cat "$dockerfile_path"
+        echo ""
+        echo "=== Generated entrypoint.sh ==="
+        cat "$entrypoint_path"
+        return 0
+    fi
+
+    # Determine platforms
+    local platforms=""
+    case "$ARCH" in
+        amd64|x86_64)
+            platforms="linux/amd64"
+            ;;
+        arm64|aarch64)
+            platforms="linux/arm64"
+            ;;
+        both|all)
+            platforms="linux/amd64,linux/arm64"
+            ;;
+        "")
+            platforms=""
+            ;;
+        *)
+            echo "Error: Invalid architecture '$ARCH'"
+            return 1
+            ;;
+    esac
+
+    # Build
+    echo "Building image..."
+    cd "$build_dir"
+
+    local build_args=(
+        --build-arg "BASE_IMAGE=${BASE_IMAGE}"
+        --build-arg "AGENT_USER=${AGENT_USER}"
+        --build-arg "AGENT_UID=${AGENT_UID}"
+        --build-arg "AGENT_GID=${AGENT_GID}"
+        --build-arg "AGENT_TYPE=${agent_type}"
+        --tag "$current_full_name"
+    )
+
+    if [[ "$NO_CACHE" == "true" ]]; then
+        build_args+=(--no-cache)
+    fi
+
+    if [[ -n "$platforms" ]]; then
+        build_args+=(--platform "$platforms")
+        if [[ "$DO_PUSH" == "true" ]]; then
+            echo "Mode: buildx with push"
+            docker buildx build "${build_args[@]}" --push -f Dockerfile .
+        else
+            echo "Mode: buildx local"
+            docker buildx build "${build_args[@]}" --load -f Dockerfile .
+        fi
+    else
+        echo "Mode: standard build (current platform)"
+        docker build "${build_args[@]}" -f Dockerfile .
+
+        if [[ "$DO_PUSH" == "true" ]] && [[ -n "$REGISTRY" ]]; then
+            echo "Pushing image..."
+            docker push "$current_full_name"
+        fi
+    fi
+
+    echo ""
+    echo "Build complete: $current_full_name"
+    echo ""
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+
+echo "=== Heretic Agent Image Builder ==="
+echo ""
+
+# Check if combined mode is requested
+if [[ "$COMBINED" == "true" ]] && [[ ${#AGENT_TYPES[@]} -gt 1 ]]; then
+    # Combined mode - all agents in one image
+    build_combined_agent
+
+    final_name="${IMAGE_NAME}:${IMAGE_TAG}"
+    [[ -n "$REGISTRY" ]] && final_name="${REGISTRY}/${final_name}"
+
+    echo "Usage examples:"
+    echo "  # Interactive mode - specify agent type at runtime"
+    for agent in "${AGENT_TYPES[@]}"; do
+        echo "  docker run -it --rm -e AGENT_TYPE=${agent} ${final_name}"
+    done
+    echo ""
+    echo "  # Workflow mode"
+    echo "  docker run -it --rm \\"
+    echo "    -e AGENT_TYPE=claude \\"
+    echo "    -e PROMPT_FILE=/workspace/prompt.md \\"
+    echo "    -e REPO_PATH=/workspace \\"
+    echo "    -v \$(pwd):/workspace \\"
+    echo "    --entrypoint /home/agent/entrypoint.sh \\"
+    echo "    ${final_name}"
+    echo ""
+elif [[ ${#AGENT_TYPES[@]} -gt 1 ]]; then
+    # Multiple agents - build separate images
+    echo "Building ${#AGENT_TYPES[@]} agent types: ${AGENT_TYPES[*]}"
+    for agent in "${AGENT_TYPES[@]}"; do
+        echo ""
+        echo "=================================================="
+        build_agent "$agent"
+        echo "=================================================="
+        echo ""
+    done
+    echo "All ${#AGENT_TYPES[@]} agent images built successfully!"
+    echo ""
+    echo "Built images:"
+    for agent in "${AGENT_TYPES[@]}"; do
+        image_suffix=""
+        [[ "$agent" != "claude" ]] && image_suffix="-${agent}"
+        final_name="${IMAGE_NAME}${image_suffix}:${IMAGE_TAG}"
+        [[ -n "$REGISTRY" ]] && final_name="${REGISTRY}/${final_name}"
+        echo "  - ${final_name}"
+    done
+else
+    # Single agent build
+    agent="${AGENT_TYPES[0]}"
+    build_agent "$agent"
+
+    # Print usage hints
+    image_suffix=""
+    [[ "$agent" != "claude" ]] && image_suffix="-${agent}"
+    final_name="${IMAGE_NAME}${image_suffix}:${IMAGE_TAG}"
+    [[ -n "$REGISTRY" ]] && final_name="${REGISTRY}/${final_name}"
+
+    echo "Usage examples:"
+    echo "  # Interactive mode (local development)"
+    echo "  docker run -it --rm ${final_name}"
+    echo ""
+    echo "  # Workflow mode (with prompt file)"
+    echo "  docker run -it --rm \\"
+    echo "    -e PROMPT_FILE=/workspace/prompt.md \\"
+    echo "    -e REPO_PATH=/workspace \\"
+    echo "    -v \$(pwd):/workspace \\"
+    echo "    --entrypoint /home/agent/entrypoint.sh \\"
+    echo "    ${final_name}"
+    echo ""
+fi
