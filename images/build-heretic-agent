@@ -400,7 +400,7 @@ DOCKERFILE_HEADER
     cat <<EOF
 LABEL org.opencontainers.image.title="Heretic Agent (${agent_type})"
 LABEL org.opencontainers.image.description="Unified agent with configurable tools (agent: ${agent_type})"
-LABEL org.opencontainers.image.vendor="Cloud Agents"
+LABEL org.opencontainers.image.vendor="Heretic"
 
 ENV DEBIAN_FRONTEND=noninteractive \\
     PYTHONUNBUFFERED=1 \\
@@ -956,7 +956,7 @@ if [[ -n "${GH_TOKEN:-}" ]] || [[ -n "${GITHUB_TOKEN:-}" ]]; then
 fi
 
 # Set git user info
-git config --global user.email "agent@cloud-agents.io"
+git config --global user.email "agent@example.com"
 git config --global user.name "Heretic Agent"
 
 # Configure git hooks if available
@@ -1261,7 +1261,7 @@ build_agent() {
     [[ "$WITH_JAVA" == "true" ]] && echo "  Java:          ${JAVA_VERSION}" || echo "  Java:          false"
     [[ "$WITH_RUST" == "true" ]] && echo "  Rust:          ${RUST_VERSION}" || echo "  Rust:          false"
     echo "  Docker CLI:    ${WITH_DOCKER}"
-    echo "  GitHub CLI:    ${WITH_DOCKER}"
+    echo "  GitHub CLI:    ${WITH_GITHUB_CLI}"
     echo "Tool backends:   sidecar-exec, ssh-exec (runtime wrappers)"
     echo ""
 

@@ -1,6 +1,6 @@
-# Claude "Fat Cat" Agent Image
-# 
-# This is a template Dockerfile. Use build-claude-image script to generate
+# Heretic Agent Image
+#
+# This is a template Dockerfile. Use build-heretic-agent script to generate
 # the final Dockerfile with your selected tools.
 #
 # Build arguments:
@@ -35,9 +35,9 @@ ARG INSTALL_RUST=false
 ARG INSTALL_DOCKER=false
 ARG INSTALL_GH_CLI=true
 
-LABEL org.opencontainers.image.title="Claude Fat Cat Agent"
-LABEL org.opencontainers.image.description="Unified Claude agent with configurable tools"
-LABEL org.opencontainers.image.vendor="Cloud Agents"
+LABEL org.opencontainers.image.title="Heretic Agent"
+LABEL org.opencontainers.image.description="Unified agent with configurable tools"
+LABEL org.opencontainers.image.vendor="Heretic"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \

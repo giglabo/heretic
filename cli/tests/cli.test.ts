@@ -21,6 +21,7 @@ describe("createProgram", () => {
     expect(commandNames).toContain("stop");
     expect(commandNames).toContain("attach");
     expect(commandNames).toContain("agents");
+    expect(commandNames).toContain("image");
     expect(commandNames).toContain("run");
   });
 

@@ -796,7 +796,7 @@ docker compose --profile agent --profile mcp --profile sidecars up -d
 | `GH_TOKEN` | GitHub token for git operations | - |
 | `GITHUB_TOKEN` | Alias for GH_TOKEN | - |
 | `GIT_AUTHOR_NAME` | Git commit author name | `Heretic Agent` |
-| `GIT_AUTHOR_EMAIL` | Git commit author email | `agent@cloud-agents.io` |
+| `GIT_AUTHOR_EMAIL` | Git commit author email | `agent@example.com` |
 | `SIDECAR_TIMEOUT` | Sidecar command timeout | `600` (10 min) |
 | `SSH_HOST` | SSH backend host | - |
 | `SSH_PORT` | SSH port | `22` |
@@ -1349,9 +1349,7 @@ Approximate image sizes for different configurations:
 ## Additional Resources
 
 - **README.md**: Full build script documentation and command-line reference
-- **MIGRATION.md**: Migration guide from `build-claude-image` to `build-heretic-agent`
-- **CHANGELOG.md**: Detailed changelog with version 2.0.0 features
-- **orchestrator-service/AGENTS.md**: Integration with orchestrator service
+- **CHANGELOG.md**: Detailed changelog with version history
 - **Build script help**: Run `./build-heretic-agent --help` for full options
 
 ### Quick Reference Cards

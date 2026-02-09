@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Universal Entrypoint for Claude Fat Cat Agent
+# Universal Entrypoint for Heretic Agent
 #
 # Handles setup for all three use cases:
 # 1. User interactive: docker run -it image → starts bash
@@ -104,8 +104,8 @@ if [[ -n "${GH_TOKEN:-}" ]]; then
 fi
 
 # Set git user info
-git config --global user.email "${GIT_AUTHOR_EMAIL:-agent@cloud-agents.io}"
-git config --global user.name "${GIT_AUTHOR_NAME:-Claude Agent}"
+git config --global user.email "${GIT_AUTHOR_EMAIL:-agent@example.com}"
+git config --global user.name "${GIT_AUTHOR_NAME:-Heretic Agent}"
 
 # Configure git hooks if available
 for hooks_path in "${REPO_PATH:-/workspace}/.githooks" "/workspace/.githooks"; do

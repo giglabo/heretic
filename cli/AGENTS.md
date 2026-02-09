@@ -80,6 +80,29 @@ heretic-cli -V run <name>
 
 Users can write logs to a file with `--log-file <path>`. File logs are always in JSON format and include all log levels.
 
+### Image Templates
+
+`src/templates/` — pure-function generators for Docker image build assets:
+
+| File | Purpose |
+|------|---------|
+| `types.ts` | `ImageAgentType`, `ImageBuildConfig`, `VALID_IMAGE_AGENTS`, `DEFAULT_BASE_IMAGE` |
+| `dockerfile.ts` | `generateDockerfile()` — compiles Handlebars template with pre-computed context |
+| `entrypoint.ts` | `generateEntrypoint()` — returns embedded entrypoint.sh |
+| `resources.ts` | `SIDECAR_EXEC_STUB`, `SSH_EXEC_SCRIPT` — embedded resource scripts |
+| `index.ts` | Barrel export |
+
+Static assets live in `src/templates/assets/`:
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile.hbs` | Handlebars template for Dockerfile generation |
+| `entrypoint.sh` | Universal container entrypoint script |
+| `sidecar-exec-stub` | Placeholder sidecar-exec script |
+| `ssh-exec` | SSH backend for tool command routing |
+
+Assets are embedded via Bun's `import ... with { type: "text" }` so `bun build --compile` includes them in the binary. The Dockerfile uses Handlebars (`{{variable}}`, `{{#if}}`) which avoids conflicts with Docker's `${VAR}` syntax. Type declarations for `.hbs` and `.sh` imports are in `src/types/text-imports.d.ts`.
+
 ### Commands
 
 All commands are in `src/commands/`. Each command is a separate file exporting an async function, registered in `cli.ts`.
@@ -138,6 +161,11 @@ heretic-cli stop <name>             # Stop specific agent (with confirmation)
 heretic-cli stop <name> --force     # Stop without confirmation
 heretic-cli stop --all              # Stop all heretic containers
 heretic-cli stop -s feat-x         # Stop containers in a specific session
+heretic-cli image build --agent claude           # Build a Claude agent image
+heretic-cli image build --agent all --with-all   # Build all agents with all tools
+heretic-cli image build --agent claude --dry-run # Preview Dockerfile without building
+heretic-cli image generate --format dockerfile   # Output Dockerfile to stdout
+heretic-cli image generate --format entrypoint   # Output entrypoint.sh to stdout
 ```
 
 ### Profile Structure

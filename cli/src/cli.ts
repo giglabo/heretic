@@ -7,6 +7,7 @@ import { runPs } from "./commands/ps";
 import { runStop } from "./commands/stop";
 import { runAttach } from "./commands/attach";
 import { createAgentsCommand } from "./commands/agents";
+import { createImageCommand } from "./commands/image";
 import { runLocalValidate } from "./commands/local-validate";
 import { runDoctor } from "./commands/doctor";
 import { initLogger, getLogger } from "./logger";
@@ -111,6 +112,9 @@ export function createProgram(): Command {
 
   // Agents command group
   program.addCommand(createAgentsCommand());
+
+  // Image build/generate command group
+  program.addCommand(createImageCommand());
 
   // Agent run command - uses a generic command name pattern
   program

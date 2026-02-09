@@ -42,6 +42,8 @@ The CLI lives entirely in `cli/`. Entry point is `src/index.ts` which checks for
 
 **Config Resolution** (`src/utils/config-resolver.ts`): Three-layer merge system: global profile → local override (`.heretic/cli/<profile>.yaml`) → CLI flags. Supports variable interpolation (`${VAR}`) and secrets resolution from shell scripts. Per-profile local overrides allow multiple profiles to have local configs in the same project.
 
+**Image Templates** (`src/templates/`): Pure-function generators for Docker image assets. Used by `heretic-cli image build` and `heretic-cli image generate`. Types are in `types.ts`, Dockerfile generation in `dockerfile.ts` (Handlebars template), entrypoint in `entrypoint.ts`, and resource scripts in `resources.ts`. Static assets (`.hbs`, `.sh`, bash scripts) live in `src/templates/assets/` and are embedded via Bun's `import ... with { type: "text" }` so `bun build --compile` includes them. Type declarations for these imports are in `src/types/text-imports.d.ts`.
+
 ## Agent Management
 
 All agent configuration MUST be done via CLI commands:

@@ -227,5 +227,4 @@ Consider for future releases:
 
 ---
 
-For detailed migration instructions, see `MIGRATION.md`.
 For usage examples and documentation, see `README.md`.

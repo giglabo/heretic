@@ -34,6 +34,7 @@ const THIRDPARTY_PRESET_DEFAULTS: Record<
   {
     url: string;
     model: string;
+    smallModel: string;
     defaultName: string;
     defaultEnvVars: Record<string, string>;
   }
@@ -41,6 +42,7 @@ const THIRDPARTY_PRESET_DEFAULTS: Record<
   zai: {
     url: "https://api.z.ai/api/anthropic",
     model: "glm-4.7",
+    smallModel: "glm-4.5-air",
     defaultName: "claude-zai",
     defaultEnvVars: {
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
@@ -50,6 +52,7 @@ const THIRDPARTY_PRESET_DEFAULTS: Record<
   kimi: {
     url: "https://api.moonshot.ai/anthropic",
     model: "kimi-k2.5",
+    smallModel: "kimi-k2.5",
     defaultName: "claude-kimi",
     defaultEnvVars: {
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
@@ -59,6 +62,7 @@ const THIRDPARTY_PRESET_DEFAULTS: Record<
   custom: {
     url: "",
     model: "",
+    smallModel: "",
     defaultName: "claude-thirdparty",
     defaultEnvVars: {
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
@@ -84,6 +88,7 @@ interface AgentInput {
   preset?: ThirdPartyPreset; // Only for third-party
   modelConfigMethod?: "env" | "settings"; // Only for third-party
   model?: string; // Only for third-party when modelConfigMethod is "env"
+  smallModel?: string; // Only for third-party — small/fast model for subagent tasks
   customEnvVars?: Record<string, string>; // Custom env vars for third-party
   anthropicTokenType?: AnthropicTokenType; // Only for anthropic
 }
@@ -132,17 +137,27 @@ echo "${token}"
 }
 
 /**
- * Model environment variables for third-party providers
- * When using "env" model config method, these are set to the selected model
+ * Main model environment variables for third-party providers
+ * Set to the primary model (e.g. glm-4.7)
  */
-const MODEL_ENV_VARS = [
+const MAIN_MODEL_ENV_VARS = [
   "ANTHROPIC_MODEL",
-  "ANTHROPIC_SMALL_FAST_MODEL",
   "ANTHROPIC_DEFAULT_OPUS_MODEL",
   "ANTHROPIC_DEFAULT_SONNET_MODEL",
+];
+
+/**
+ * Small/fast model environment variables for third-party providers
+ * Set to a lighter model for subagent and fast tasks (e.g. glm-4.5-air)
+ */
+const SMALL_MODEL_ENV_VARS = [
+  "ANTHROPIC_SMALL_FAST_MODEL",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
   "CLAUDE_CODE_SUBAGENT_MODEL",
 ];
+
+/** All model environment variables (union of main + small) */
+const ALL_MODEL_ENV_VARS = [...MAIN_MODEL_ENV_VARS, ...SMALL_MODEL_ENV_VARS];
 
 /**
  * Create Claude settings.json file for the agent
@@ -155,7 +170,8 @@ function createClaudeSettings(
   agentType: "anthropic" | "thirdparty" | "copilot",
   sourceSettingsPath?: string,
   modelConfigMethod?: "env" | "settings",
-  model?: string
+  model?: string,
+  smallModel?: string
 ): string {
   const logger = getLogger();
   const destPath = join(hereticDir, `${agentName}-settings.json`);
@@ -184,8 +200,12 @@ function createClaudeSettings(
   if (agentType === "thirdparty" && modelConfigMethod === "settings" && model) {
     const existingEnv = (settings.env as Record<string, string>) || {};
     const modelEnv: Record<string, string> = {};
-    for (const envVar of MODEL_ENV_VARS) {
+    const effectiveSmallModel = smallModel || model;
+    for (const envVar of MAIN_MODEL_ENV_VARS) {
       modelEnv[envVar] = model;
+    }
+    for (const envVar of SMALL_MODEL_ENV_VARS) {
+      modelEnv[envVar] = effectiveSmallModel;
     }
     settings.env = {
       ...existingEnv,
@@ -193,8 +213,8 @@ function createClaudeSettings(
     };
 
     logger.info("  Model env vars added to settings.json:");
-    for (const envVar of MODEL_ENV_VARS) {
-      logger.info(`    ${envVar}: ${model}`);
+    for (const envVar of ALL_MODEL_ENV_VARS) {
+      logger.info(`    ${envVar}: ${modelEnv[envVar]}`);
     }
   }
 
@@ -252,8 +272,12 @@ function createAgentProfile(
 
     // If using "env" model config method, add model env vars to profile
     if (input.modelConfigMethod === "env" && input.model) {
-      for (const envVar of MODEL_ENV_VARS) {
+      const effectiveSmallModel = input.smallModel || input.model;
+      for (const envVar of MAIN_MODEL_ENV_VARS) {
         baseEnv[envVar] = input.model;
+      }
+      for (const envVar of SMALL_MODEL_ENV_VARS) {
+        baseEnv[envVar] = effectiveSmallModel;
       }
     }
 
@@ -521,13 +545,15 @@ async function configureThirdPartyAgent(existingName?: string): Promise<AgentInp
   let model: string | undefined;
   let settingsPath: string | undefined;
 
+  let smallModel: string | undefined;
+
   if (modelConfigMethod === "env") {
     // Step 7a: Get model name for env vars
     const modelAnswer = await inquirer.prompt([
       {
         type: "input",
         name: "model",
-        message: "Enter model name:",
+        message: "Enter primary model name:",
         default: defaults.model,
         validate: (input: string): string | boolean => {
           if (!input || !input.trim()) {
@@ -539,9 +565,30 @@ async function configureThirdPartyAgent(existingName?: string): Promise<AgentInp
     ]);
     model = modelAnswer.model;
 
+    // Step 7a.2: Get small/fast model name
+    const smallModelAnswer = await inquirer.prompt([
+      {
+        type: "input",
+        name: "smallModel",
+        message: "Enter small/fast model name (for subagent and fast tasks):",
+        default: defaults.smallModel || model,
+        validate: (input: string): string | boolean => {
+          if (!input || !input.trim()) {
+            return "Small model name is required";
+          }
+          return true;
+        },
+      },
+    ]);
+    smallModel = smallModelAnswer.smallModel;
+
+    const effectiveSmallModel = smallModel || model;
     logger.info("\n  Model will be set via environment variables:");
-    for (const envVar of MODEL_ENV_VARS) {
+    for (const envVar of MAIN_MODEL_ENV_VARS) {
       logger.info(`    ${envVar}: ${model}`);
+    }
+    for (const envVar of SMALL_MODEL_ENV_VARS) {
+      logger.info(`    ${envVar}: ${effectiveSmallModel}`);
     }
   } else {
     // Step 7b: Get optional settings.json path, or enter model for new settings
@@ -573,7 +620,7 @@ async function configureThirdPartyAgent(existingName?: string): Promise<AgentInp
         {
           type: "input",
           name: "model",
-          message: "Enter model name (will be added to settings.json):",
+          message: "Enter primary model name (will be added to settings.json):",
           default: defaults.model,
           validate: (input: string): string | boolean => {
             if (!input || !input.trim()) {
@@ -584,6 +631,23 @@ async function configureThirdPartyAgent(existingName?: string): Promise<AgentInp
         },
       ]);
       model = modelAnswer.model;
+
+      // Ask for small/fast model
+      const smallModelAnswer = await inquirer.prompt([
+        {
+          type: "input",
+          name: "smallModel",
+          message: "Enter small/fast model name (for subagent and fast tasks):",
+          default: defaults.smallModel || model,
+          validate: (input: string): string | boolean => {
+            if (!input || !input.trim()) {
+              return "Small model name is required";
+            }
+            return true;
+          },
+        },
+      ]);
+      smallModel = smallModelAnswer.smallModel;
     }
   }
 
@@ -652,6 +716,7 @@ async function configureThirdPartyAgent(existingName?: string): Promise<AgentInp
     preset,
     modelConfigMethod,
     model,
+    smallModel,
     customEnvVars: Object.keys(customEnvVars).length > 0 ? customEnvVars : undefined,
   };
 }
@@ -800,7 +865,8 @@ async function manageAgents(): Promise<void> {
           agentInput.type,
           agentInput.settingsPath,
           agentInput.modelConfigMethod,
-          agentInput.model
+          agentInput.model,
+          agentInput.smallModel
         );
         logger.info(`✓ Created Claude settings: ${settingsPath}`);
       }

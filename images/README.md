@@ -78,8 +78,8 @@ The entrypoint uses these environment variables for setup:
 - `REPO_PATH` - Working directory path (default: `/workspace`)
 
 **Git Configuration:**
-- `GIT_AUTHOR_NAME` - Git user name (default: `Claude Agent`)
-- `GIT_AUTHOR_EMAIL` - Git user email (default: `agent@cloud-agents.io`)
+- `GIT_AUTHOR_NAME` - Git user name (default: `Heretic Agent`)
+- `GIT_AUTHOR_EMAIL` - Git user email (default: `agent@example.com`)
 
 **Agent Settings:**
 - **Claude**: Entrypoint looks for `claude-settings.json` in `${HERETIC_DIR:-/workspace/.heretic}/`, copies to `~/.claude/settings.json`
@@ -89,7 +89,7 @@ The entrypoint uses these environment variables for setup:
 
 **Any additional environment variables** are passed through to the command execution environment.
 
-> **For orchestrator-specific environment variables** (EXEC_ID, TASK_ID, KANBAN_CARD_ID, HERETIC_DIR, etc.), see [`orchestrator-service/AGENTS.md`](../orchestrator-service/AGENTS.md#environment-variables)
+> **For orchestrator-specific environment variables** (EXEC_ID, TASK_ID, KANBAN_CARD_ID, HERETIC_DIR, etc.), see the orchestrator service documentation.
 
 **NOT passed (now in command):**
 - ❌ `PROMPT_FILE` - use command arg instead
@@ -341,7 +341,7 @@ The generated entrypoint script supports two modes:
 When `PROMPT_FILE` is not set, the container starts an interactive shell:
 
 ```bash
-docker run -it claude-fat-cat:latest
+docker run -it heretic-agent:latest
 # Starts bash shell with all tools available
 ```
 
