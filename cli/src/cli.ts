@@ -8,6 +8,7 @@ import { runStop } from "./commands/stop";
 import { runAttach } from "./commands/attach";
 import { createAgentsCommand } from "./commands/agents";
 import { createImageCommand } from "./commands/image";
+import { createMnemoniaCommand } from "./commands/mnemoria";
 import { runLocalValidate } from "./commands/local-validate";
 import { runDoctor } from "./commands/doctor";
 import { initLogger, getLogger } from "./logger";
@@ -115,6 +116,9 @@ export function createProgram(): Command {
 
   // Image build/generate command group
   program.addCommand(createImageCommand());
+
+  // Mnemoria memory server client command group
+  program.addCommand(createMnemoniaCommand());
 
   // Agent run command - uses a generic command name pattern
   program

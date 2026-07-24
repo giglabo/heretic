@@ -19,3 +19,8 @@ tmp
 credentials*
 **/secrets/
 *.secret
+*.secret.mcp.json
+
+# MCP server configs (may contain live tokens/API keys)
+.mcp.json
+**/.mcp.json
