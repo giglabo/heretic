@@ -2,12 +2,23 @@
  * Tests for ComposeRunner
  */
 
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ComposeRunner } from "../src/runners/compose-runner";
 import type { ResolvedAgentConfig } from "../src/types/agent-profile";
 
 describe("ComposeRunner", () => {
   let mockConfig: ResolvedAgentConfig;
+  let tempProjectDir: string | undefined;
+
+  afterEach(() => {
+    if (tempProjectDir) {
+      rmSync(tempProjectDir, { recursive: true, force: true });
+      tempProjectDir = undefined;
+    }
+  });
 
   beforeEach(() => {
     mockConfig = {
@@ -140,6 +151,24 @@ describe("ComposeRunner", () => {
     };
     const runner = new ComposeRunner(config);
     expect(runner).toBeDefined();
+  });
+
+  test("run_as_root forces root user and sets HERETIC_RUN_AS_ROOT", () => {
+    // Real project dir: run_as_root writes an entrypoint override into the session dir
+    tempProjectDir = mkdtempSync(join(tmpdir(), "heretic-compose-"));
+    const config: ResolvedAgentConfig = {
+      ...mockConfig,
+      projectDir: tempProjectDir,
+      extra: {
+        user: "1000:1000",
+        run_as_root: true,
+      },
+    };
+    const runner = new ComposeRunner(config);
+    const yaml = (runner as any).generateComposeYaml() as string;
+
+    expect(yaml).toContain("user: root");
+    expect(yaml).toContain("HERETIC_RUN_AS_ROOT");
   });
 
   test("should handle command override as array", () => {

@@ -40,10 +40,16 @@ function parseMcpOption(value: string): McpServer[] {
 
 export async function runAgent(
   agentName: string,
-  options: { detach?: boolean; command?: string[]; mcp?: string; session?: string }
+  options: {
+    detach?: boolean;
+    command?: string[];
+    mcp?: string;
+    session?: string;
+    asRoot?: boolean;
+  }
 ): Promise<void> {
   const logger = getLogger();
-  const { detach = false, command, mcp, session } = options;
+  const { detach = false, command, mcp, session, asRoot } = options;
 
   try {
     // Parse --mcp override if provided
@@ -58,6 +64,12 @@ export async function runAgent(
         process.exitCode = 1;
         return;
       }
+    }
+
+    // --root override: only set when explicitly passed so it never clobbers
+    // a profile's run_as_root value when the flag is absent.
+    if (asRoot) {
+      cliOverrides.extra = { run_as_root: true };
     }
 
     // Resolve configuration

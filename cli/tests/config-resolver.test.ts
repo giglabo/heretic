@@ -345,6 +345,32 @@ describe("Config Resolver", () => {
     //   });
     // });
 
+    it("should merge cliOverrides extra.run_as_root without clobbering other extra fields", () => {
+      const globalProfile: AgentProfile = {
+        image: "test-image:latest",
+        runner: "docker",
+        extra: {
+          hostname: "agent-box",
+          labels: { team: "platform" },
+        },
+      };
+
+      mockLoadProfile.mockReturnValue(globalProfile);
+      mockHasLocalConfig.mockReturnValue(false);
+
+      const result = resolveConfig({
+        profileName: "test-profile",
+        projectDir: "/project",
+        cliOverrides: {
+          extra: { run_as_root: true },
+        },
+      });
+
+      expect(result.extra.run_as_root).toBe(true);
+      expect(result.extra.hostname).toBe("agent-box"); // preserved
+      expect(result.extra.labels).toEqual({ team: "platform" }); // preserved
+    });
+
     it("should merge extra labels shallowly", () => {
       const globalProfile: AgentProfile = {
         image: "test-image:latest",

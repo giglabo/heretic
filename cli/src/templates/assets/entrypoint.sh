@@ -10,6 +10,20 @@
 set -e
 
 # =============================================================================
+# Root Mode — keep /home/agent as HOME when the container runs as root
+# =============================================================================
+
+if [[ "$(id -u)" == "0" ]] && [[ -n "${HERETIC_RUN_AS_ROOT:-}" ]]; then
+    # Run as root but reuse the agent user's home directory so all the
+    # bind-mounted config (claude settings, .claude.json, auth, ssh keys)
+    # still resolves under $HOME.
+    AGENT_USER="${AGENT_USER:-agent}"
+    export HOME="/home/$AGENT_USER"
+    export USER="root"
+    echo "Running as root (HOME=$HOME)"
+fi
+
+# =============================================================================
 # Runtime Tool Wrappers
 # =============================================================================
 

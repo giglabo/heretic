@@ -283,6 +283,14 @@ This applies to all runner types: `docker`, `compose`, and `custom`.
 
 For non-copilot agents (claude, aider, generic), the docker-runner automatically creates `.claude.json` with `{ "hasCompletedOnboarding": true }` in the session directory. This file is bind-mounted to `/home/agent/.claude.json` and `/root/.claude.json` to skip Claude Code's interactive login/onboarding screen.
 
+### Running as Root
+
+Set `extra.run_as_root: true` in a profile — or pass `--root` to `heretic-cli run <agent>` (also works on the `heretic-cli <agent>` shortcut) — to keep the container running as **root** instead of the image's `agent` user. The `--root` flag is a CLI override that sets `extra.run_as_root` for that run only; it is only applied when explicitly passed, so it never clobbers a profile's value when absent. The runners (`docker-runner.ts`, `compose-runner.ts`) force `User: root` and inject `HERETIC_RUN_AS_ROOT=1`. The entrypoint's root-mode block (top of `entrypoint.sh`) then exports `HOME=/home/agent` and `USER=root` before anything else runs. Keeping `HOME=/home/agent` means all bind-mounted config (claude settings, `.claude.json`, auth, ssh keys) still resolves under `$HOME`.
+
+**No image rebuild required.** The root branch lives in `entrypoint.sh`, which is baked into the image — but when `run_as_root` is set, the runners write the current binary-embedded entrypoint to the session dir and bind-mount it over `/opt/heretic/entrypoint.sh` (read-only), so the flag works on images built before the feature existed. The `--root` flag is parsed regardless of position on the command line (`run cs --root` and `run --root cs` both work); `src/index.ts` `hoistRootFlag()` moves a bare `--root` ahead of the agent name so `passThroughOptions()` doesn't swallow it, while leaving anything after a `--` separator (the custom command) untouched.
+
+Note: `docker exec` into a root container reports `HOME=/root` because it's a fresh login shell that doesn't inherit the entrypoint's exported env. The real session process (PID 1) has `HOME=/home/agent` — verify with `tr '\0' '\n' < /proc/1/environ | grep HOME`.
+
 ### Container Labels
 
 Every heretic-managed container gets these labels:

@@ -6,7 +6,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { writeFileSync, readFileSync, unlinkSync, existsSync } from "node:fs";
+import { writeFileSync, readFileSync, unlinkSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ResolvedAgentConfig } from "../types/agent-profile";
@@ -16,6 +16,7 @@ import { writeMcpFile, cleanupMcpFile, getMcpMountPaths, getExistingMcpPath } fr
 import { getDockerSocketPath } from "../utils/docker";
 import { loadSettings, resolveToken } from "../utils/settings";
 import { ensureSessionDir, sanitizeSessionName } from "../utils/session";
+import { generateEntrypoint } from "../templates";
 import { getLogger } from "../logger";
 
 const logger = getLogger();
@@ -256,6 +257,16 @@ export class ComposeRunner implements Runner {
       return `${vol.source}:${vol.target}${readonly}`;
     });
 
+    // run_as_root: mount the current (embedded) entrypoint over the image's
+    // baked one so the flag works without rebuilding the image.
+    if (config.extra?.run_as_root) {
+      const sessionDir = ensureSessionDir(config.projectDir, config.sessionName);
+      const entrypointPath = join(sessionDir, "entrypoint.sh");
+      writeFileSync(entrypointPath, generateEntrypoint());
+      chmodSync(entrypointPath, 0o755);
+      volumes.push(`${entrypointPath}:/opt/heretic/entrypoint.sh:ro`);
+    }
+
     // SSH config → env vars + key bind
     if (config.ssh) {
       environment.SSH_HOST = config.ssh.host;
@@ -378,6 +389,11 @@ export class ComposeRunner implements Runner {
     // Extract extra options
     const extra = config.extra || {};
 
+    // Keep the container running as root (with /home/agent as HOME) when requested
+    if (extra.run_as_root) {
+      environment["HERETIC_RUN_AS_ROOT"] = "1";
+    }
+
     // Build labels
     const labels: Record<string, string> = {
       "heretic.managed": "true",
@@ -422,8 +438,10 @@ export class ComposeRunner implements Runner {
       agentService.privileged = extra.privileged;
     }
 
-    // Add user if specified
-    if (extra.user) {
+    // Add user if specified (run_as_root forces root regardless)
+    if (extra.run_as_root) {
+      agentService.user = "root";
+    } else if (extra.user) {
       agentService.user = extra.user;
     }
 

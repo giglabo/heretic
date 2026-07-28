@@ -92,6 +92,11 @@ When configuring an Anthropic agent with a token, the user selects the type:
 
 For non-copilot agents, the docker-runner seeds `.claude.json` with `{ "hasCompletedOnboarding": true }` to skip Claude Code's interactive login screen. This file is bind-mounted to `/home/agent/.claude.json` and `/root/.claude.json`.
 
+### Running as Root
+
+Set `extra.run_as_root: true` on a profile (or pass `--root` to `heretic-cli run <agent>` for a one-off override) to keep the container running as root rather than as the image's `agent` user. The `--root` flag only applies when explicitly passed, so it never clobbers a profile's value. The runners force `User: root`, inject `HERETIC_RUN_AS_ROOT=1`, and **bind-mount the current (binary-embedded) `entrypoint.sh` over the image's baked `/opt/heretic/entrypoint.sh`** so the flag works without rebuilding the image. The entrypoint's root-mode block then exports `HOME=/home/agent` and `USER=root`, so all bind-mounted config (claude settings, `.claude.json`, auth, ssh keys) keeps resolving under `$HOME`. (Note: `docker exec` into the container shows `HOME=/root` because it's a fresh login that doesn't inherit the entrypoint's exported env — the actual session shell, PID 1, has `HOME=/home/agent`.)
+
+
 ## Documentation Requirements
 
 **IMPORTANT:** When adding a new CLI command or updating an existing one, you MUST update the documentation:

@@ -154,6 +154,12 @@ export interface AgentProfileExtra {
   privileged?: boolean;
   /** User:Group inside container */
   user?: string;
+  /**
+   * Run the container as root instead of dropping to the agent user, while
+   * still using the agent user's home directory (/home/agent) as HOME so all
+   * bind-mounted config (claude settings, auth, ssh keys, etc.) keeps working.
+   */
+  run_as_root?: boolean;
   /** Container hostname */
   hostname?: string;
   /** Memory limit (e.g., "4g", "512m") */

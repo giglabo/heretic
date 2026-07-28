@@ -9,7 +9,7 @@
 import type Docker from "dockerode";
 import type { ContainerCreateOptions } from "dockerode";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ResolvedAgentConfig } from "../types/agent-profile";
@@ -25,6 +25,7 @@ import {
 import { writeMcpFile, cleanupMcpFile, getMcpMountPaths, getExistingMcpPath } from "./mcp-helper";
 import { loadSettings, resolveToken } from "../utils/settings";
 import { ensureSessionDir, sanitizeSessionName } from "../utils/session";
+import { generateEntrypoint } from "../templates";
 import { getLogger } from "../logger";
 
 const logger = getLogger();
@@ -356,6 +357,11 @@ export class DockerRunner implements Runner {
 
     const env = Object.entries(envMap).map(([key, value]) => `${key}=${value}`);
 
+    // Keep the container running as root (with /home/agent as HOME) when requested
+    if (config.extra?.run_as_root) {
+      env.push("HERETIC_RUN_AS_ROOT=1");
+    }
+
     // Log env var names (not values for security)
     logger.info({ envVars: Object.keys(envMap) }, "Environment variables being set");
     // Debug: log env var values (masked) for troubleshooting
@@ -369,6 +375,15 @@ export class DockerRunner implements Runner {
       const readonly = vol.readonly ? ":ro" : "";
       return `${vol.source}:${vol.target}${readonly}`;
     });
+
+    // run_as_root: mount the current (embedded) entrypoint over the image's
+    // baked one so the flag works without rebuilding the image. The entrypoint
+    // honors HERETIC_RUN_AS_ROOT to stay root with HOME=/home/agent.
+    if (config.extra?.run_as_root) {
+      const entrypointPath = this.writeEntrypointOverride(config);
+      binds.push(`${entrypointPath}:/opt/heretic/entrypoint.sh:ro`);
+      logger.debug({ entrypointPath }, "Mounting run-as-root entrypoint override");
+    }
 
     // SSH config → env vars + key bind
     if (config.ssh) {
@@ -506,11 +521,24 @@ export class DockerRunner implements Runner {
         NanoCpus: nanoCpus,
         ShmSize: shmSize,
       },
-      User: extra.user,
+      User: extra.run_as_root ? "root" : extra.user,
       Hostname: extra.hostname,
     };
 
     return options;
+  }
+
+  /**
+   * Write the embedded entrypoint to the session dir and return its host path.
+   * Bind-mounted over the image's baked /opt/heretic/entrypoint.sh so the
+   * run_as_root branch works on images built before the feature existed.
+   */
+  private writeEntrypointOverride(config: ResolvedAgentConfig): string {
+    const sessionDir = ensureSessionDir(config.projectDir, config.sessionName);
+    const entrypointPath = join(sessionDir, "entrypoint.sh");
+    writeFileSync(entrypointPath, generateEntrypoint());
+    chmodSync(entrypointPath, 0o755);
+    return entrypointPath;
   }
 
   /**

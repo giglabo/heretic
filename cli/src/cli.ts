@@ -122,24 +122,25 @@ export function createProgram(): Command {
 
   // Agent run command - uses a generic command name pattern
   program
-    .command("run <agent-name>")
+    .command("run <agent-name> [command...]")
     .description("Run an agent by profile name")
     .option("-d, --detach", "Run container in background (detached mode)", false)
     .option("-s, --session <name>", "Session name (default: 'default')")
     .option("--mcp <value>", "MCP server config (JSON string or path to .json file)")
+    .option("--root", "Run the container as root (keeps /home/agent as HOME)")
     .allowUnknownOption()
     .passThroughOptions()
-    .action(async (agentName: string, options, cmd: Command) => {
-      // Extract custom command arguments (everything after --)
-      // Commander.js puts pass-through args in cmd.args after processing known options
-      const unknownArgs = cmd.args.slice(1); // Skip agent name
-      const customCommand = unknownArgs.length > 0 ? unknownArgs : undefined;
+    .action(async (agentName: string, command: string[], options) => {
+      // `command` holds everything after the agent name (custom command to run
+      // in the container). passThroughOptions() keeps its flags intact.
+      const customCommand = command.length > 0 ? command : undefined;
 
       await runAgent(agentName, {
         detach: options.detach,
         command: customCommand,
         mcp: options.mcp,
         session: options.session,
+        asRoot: options.root,
       });
     });
 
@@ -164,6 +165,7 @@ export function createProgram(): Command {
     // Treat as agent name - parse options from process.argv
     const argv = process.argv.slice(3); // Skip node, script, and agent name
     const detach = argv.includes("--detach") || argv.includes("-d");
+    const asRoot = argv.includes("--root") || undefined;
 
     // Parse --session / -s
     let session: string | undefined;
@@ -182,6 +184,7 @@ export function createProgram(): Command {
       detach,
       command: customCommand,
       session,
+      asRoot,
     });
   });
 

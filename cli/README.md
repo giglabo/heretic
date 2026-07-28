@@ -35,6 +35,17 @@ bun install
 
 Unknown commands are treated as agent profile names, so `heretic-cli claude` is equivalent to `heretic-cli run claude`.
 
+`run` accepts a custom command after the profile name (`heretic-cli run claude npm test`) and these options:
+
+| Option | Description |
+|--------|-------------|
+| `-d, --detach` | Run the container in the background |
+| `-s, --session <name>` | Session name (default: `default`) |
+| `--mcp <value>` | MCP server config (JSON string or path to a `.json` file) |
+| `--root` | Run the container as root, keeping `/home/agent` as `HOME` |
+
+`--root` works in any position (`run --root claude` or `run claude --root`) and on the shortcut form (`heretic-cli claude --root`). It is a one-off override of a profile's `extra.run_as_root`.
+
 For full usage details, options, and examples see [Heretic Docs](https://heretic.giglabo.com/docs).
 
 ## Development

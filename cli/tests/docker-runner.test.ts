@@ -203,6 +203,31 @@ describe("DockerRunner", () => {
     expect(options.HostConfig?.Privileged).toBe(true);
   });
 
+  test("translateConfig forces root user and HERETIC_RUN_AS_ROOT when run_as_root is set", () => {
+    const configRoot: ResolvedAgentConfig = {
+      ...mockConfig,
+      extra: {
+        user: "agent",
+        run_as_root: true,
+      },
+    };
+
+    const runner = new DockerRunner(configRoot);
+    const translateConfig = (runner as any).translateConfig.bind(runner);
+
+    const options = translateConfig();
+    expect(options.User).toBe("root");
+    expect(options.Env).toContain("HERETIC_RUN_AS_ROOT=1");
+  });
+
+  test("translateConfig does not set HERETIC_RUN_AS_ROOT when run_as_root is unset", () => {
+    const runner = new DockerRunner(mockConfig);
+    const translateConfig = (runner as any).translateConfig.bind(runner);
+
+    const options = translateConfig();
+    expect(options.Env).not.toContain("HERETIC_RUN_AS_ROOT=1");
+  });
+
   test("translateConfig adds SSH env vars and key bind", () => {
     const configWithSsh: ResolvedAgentConfig = {
       ...mockConfig,
