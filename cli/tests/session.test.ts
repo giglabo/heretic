@@ -6,7 +6,13 @@ import { describe, test, expect, afterEach } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { getSessionDir, ensureSessionDir, sanitizeSessionName } from "../src/utils/session";
+import {
+  getSessionDir,
+  ensureSessionDir,
+  sanitizeSessionName,
+  projectDirHash,
+  getAgentContainerName,
+} from "../src/utils/session";
 
 describe("Session Utils", () => {
   let testDir: string;
@@ -75,6 +81,26 @@ describe("Session Utils", () => {
 
     test("should handle empty string", () => {
       expect(sanitizeSessionName("")).toBe("");
+    });
+  });
+
+  describe("getAgentContainerName", () => {
+    test("should follow heretic-<agent>-<session>-<hash8>", () => {
+      const name = getAgentContainerName("my.agent", "feature/x", "/my/project");
+      expect(name).toBe(`heretic-my-agent-feature-x-${projectDirHash("/my/project")}`);
+      expect(projectDirHash("/my/project")).toMatch(/^[a-f0-9]{8}$/);
+    });
+
+    test("should differ by session in the same folder", () => {
+      expect(getAgentContainerName("a", "one", "/p")).not.toBe(
+        getAgentContainerName("a", "two", "/p")
+      );
+    });
+
+    test("should differ by folder for the same session", () => {
+      expect(getAgentContainerName("a", "default", "/p1")).not.toBe(
+        getAgentContainerName("a", "default", "/p2")
+      );
     });
   });
 });

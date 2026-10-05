@@ -7,7 +7,32 @@ import {
   stopContainer,
   removeContainer,
 } from "../utils/docker";
+import {
+  SIDECAR_ROLE_LABEL,
+  SIDECAR_ROLE_VALUE,
+  removeNetworkByName,
+} from "../runners/sidecar-manager";
 import type { ContainerInfo } from "dockerode";
+
+/** True when a container is a heretic-managed build sidecar (not an agent). */
+function isSidecar(container: ContainerInfo): boolean {
+  return container.Labels?.[SIDECAR_ROLE_LABEL] === SIDECAR_ROLE_VALUE;
+}
+
+/**
+ * Find the build-sidecar containers that belong to a given agent container
+ * (same project, and same session when the agent has one).
+ */
+function siblingSidecars(agent: ContainerInfo, all: ContainerInfo[]): ContainerInfo[] {
+  const project = agent.Labels?.["heretic.project"];
+  const session = agent.Labels?.["heretic.session"];
+  return all.filter(
+    (c) =>
+      isSidecar(c) &&
+      c.Labels?.["heretic.project"] === project &&
+      (!session || c.Labels?.["heretic.session"] === session)
+  );
+}
 
 interface StopOptions {
   all?: boolean;
@@ -133,28 +158,32 @@ export async function runStop(name?: string, options?: StopOptions): Promise<voi
       return;
     }
 
-    // Determine which containers to stop
+    // Determine which containers to stop. Build sidecars are siblings of an
+    // agent, so when stopping a single agent we also pull in its sidecars; when
+    // selecting the "primary" match we look only at agent containers so a sidecar
+    // is never mistaken for the agent.
+    const agentContainers = containers.filter((c) => !isSidecar(c));
     let containersToStop: ContainerInfo[] = [];
 
     if (all) {
-      // Stop all heretic containers
+      // Stop all heretic containers (agents + their sidecars)
       containersToStop = containers;
     } else if (name) {
       // Find container by name or ID
-      const container = await findContainerByNameOrId(name, containers);
+      const container = await findContainerByNameOrId(name, agentContainers);
       if (!container) {
         logRaw(`No heretic container found matching '${name}'`);
         return;
       }
-      containersToStop = [container];
+      containersToStop = [container, ...siblingSidecars(container, containers)];
     } else {
       // Find container for current directory
-      const container = await findContainerByProject(process.cwd(), containers, session);
+      const container = await findContainerByProject(process.cwd(), agentContainers, session);
       if (!container) {
         logRaw("No heretic container found for the current directory");
         return;
       }
-      containersToStop = [container];
+      containersToStop = [container, ...siblingSidecars(container, containers)];
     }
 
     // Confirm before stopping unless --force is passed
@@ -187,6 +216,20 @@ export async function runStop(name?: string, options?: StopOptions): Promise<voi
         const name = container.Names[0]?.replace(/^\//, "") || container.Id.substring(0, 12);
         errors.push(`${name}: ${error}`);
         // Continue with other containers even if one fails
+      }
+    }
+
+    // Remove the per-run build-sidecar networks once their containers are gone
+    // (skip when --keep leaves containers attached). Named cache volumes are
+    // intentionally preserved so caches stay warm across runs.
+    if (!keep) {
+      const networks = new Set<string>();
+      for (const container of containersToStop) {
+        const net = container.Labels?.["heretic.network"];
+        if (net) networks.add(net);
+      }
+      for (const net of networks) {
+        await removeNetworkByName(docker, net);
       }
     }
 

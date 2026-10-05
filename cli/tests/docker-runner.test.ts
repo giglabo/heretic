@@ -92,15 +92,6 @@ describe("DockerRunner", () => {
     expect(parseCpus("0.5")).toBe(5e8);
   });
 
-  test("translatePorts handles various port formats", () => {
-    const runner = new DockerRunner(mockConfig);
-    const translatePorts = (runner as any).translatePorts.bind(runner);
-
-    const result = translatePorts(["8080", "3000:80"]);
-    expect(result["8080/tcp"]).toEqual([{ HostPort: "8080" }]);
-    expect(result["80/tcp"]).toEqual([{ HostPort: "3000" }]);
-  });
-
   test("generateContainerName follows pattern with session", () => {
     const runner = new DockerRunner(mockConfig);
     const generateName = (runner as any).generateContainerName.bind(runner);
@@ -183,6 +174,21 @@ describe("DockerRunner", () => {
     expect(options.HostConfig?.PortBindings).toEqual({
       "80/tcp": [{ HostPort: "8080" }],
       "3000/tcp": [{ HostPort: "3000" }],
+    });
+    // The Engine API ignores bindings for ports the image does not EXPOSE.
+    expect(options.ExposedPorts).toEqual({ "80/tcp": {}, "3000/tcp": {} });
+  });
+
+  test("translateConfig publishes ranges, bind IPs and udp", () => {
+    const runner = new DockerRunner({
+      ...mockConfig,
+      extra: { ports: ["0.0.0.0:3000-3001:3000-3001", "5353/udp"] },
+    });
+    const options = (runner as any).translateConfig.bind(runner)();
+    expect(options.HostConfig?.PortBindings).toEqual({
+      "3000/tcp": [{ HostIp: "0.0.0.0", HostPort: "3000" }],
+      "3001/tcp": [{ HostIp: "0.0.0.0", HostPort: "3001" }],
+      "5353/udp": [{ HostPort: "5353" }],
     });
   });
 
@@ -442,6 +448,57 @@ describe("DockerRunner", () => {
       // With mcpOverride: true, MCP should always be mounted
       const mcpBind = options.HostConfig?.Binds?.find((b: string) => b.includes(".mcp.json"));
       expect(mcpBind).toBeDefined();
+    });
+  });
+
+  describe("build sidecar wiring", () => {
+    const wiring = {
+      buildSidecars: '{"node":{"internal_url":"http://builder-node:8080"}}',
+      envPassthrough: "NPM_TOKEN,PIP_INDEX_URL",
+      networkName: "heretic-net-test-agent-default-abcd1234",
+    };
+
+    test("injects BUILD_SIDECARS + SIDECAR_ENV_PASSTHROUGH and joins the network", () => {
+      const runner = new DockerRunner({ ...mockConfig, extra: {} });
+      const translateConfig = (runner as any).translateConfig.bind(runner);
+
+      const options = translateConfig(undefined, wiring);
+      expect(options.Env).toContain(`BUILD_SIDECARS=${wiring.buildSidecars}`);
+      expect(options.Env).toContain("SIDECAR_ENV_PASSTHROUGH=NPM_TOKEN,PIP_INDEX_URL");
+      expect(options.HostConfig?.NetworkMode).toBe(wiring.networkName);
+      expect(options.Labels?.["heretic.network"]).toBe(wiring.networkName);
+    });
+
+    test("omits SIDECAR_ENV_PASSTHROUGH when the allowlist is empty", () => {
+      const runner = new DockerRunner({ ...mockConfig, extra: {} });
+      const translateConfig = (runner as any).translateConfig.bind(runner);
+
+      const options = translateConfig(undefined, { ...wiring, envPassthrough: "" });
+      const hasPassthrough = (options.Env as string[]).some((e: string) =>
+        e.startsWith("SIDECAR_ENV_PASSTHROUGH=")
+      );
+      expect(hasPassthrough).toBe(false);
+    });
+
+    test("a user-pinned network_mode wins over the sidecar network", () => {
+      // mockConfig pins extra.network = "host"
+      const runner = new DockerRunner(mockConfig);
+      const translateConfig = (runner as any).translateConfig.bind(runner);
+
+      const options = translateConfig(undefined, wiring);
+      expect(options.HostConfig?.NetworkMode).toBe("host");
+    });
+
+    test("no wiring → no BUILD_SIDECARS and default network handling", () => {
+      const runner = new DockerRunner({ ...mockConfig, extra: {} });
+      const translateConfig = (runner as any).translateConfig.bind(runner);
+
+      const options = translateConfig();
+      const hasBuildSidecars = (options.Env as string[]).some((e: string) =>
+        e.startsWith("BUILD_SIDECARS=")
+      );
+      expect(hasBuildSidecars).toBe(false);
+      expect(options.HostConfig?.NetworkMode).toBeUndefined();
     });
   });
 });

@@ -58,6 +58,16 @@ setup_tool_wrappers() {
         return 0
     fi
 
+    # A backend IS configured, so we are about to write wrappers. Fail with a clear
+    # message if the dir is not writable, instead of dying on a bare "Permission
+    # denied" under `set -e` (the image must chown $WRAPPER_DIR to the agent user).
+    if ! (: > "$WRAPPER_DIR/.probe") 2>/dev/null; then
+        echo "FATAL: $WRAPPER_DIR is not writable by $(id -un) (uid $(id -u)); tool backends disabled" >&2
+        echo "       rebuild the agent image so /opt/sidecar/wrappers is owned by the agent user" >&2
+        exit 1
+    fi
+    rm -f "$WRAPPER_DIR/.probe"
+
     local wrapper_count=0
 
     for runtime in "${!RUNTIME_COMMANDS[@]}"; do

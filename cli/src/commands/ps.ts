@@ -1,5 +1,6 @@
 import { getLogger, logRaw } from "../logger";
 import { isDockerAvailable, listContainers, getDockerClient } from "../utils/docker";
+import { SIDECAR_ROLE_LABEL, SIDECAR_ROLE_VALUE } from "../runners/sidecar-manager";
 import type { Port } from "dockerode";
 
 interface PsOptions {
@@ -121,12 +122,18 @@ export async function runPs(options: PsOptions): Promise<void> {
 
     // List all containers with heretic label filter
     const docker = getDockerClient();
-    const containers = await listContainers(docker, {
+    const allContainers = await listContainers(docker, {
       all: true,
       filters: JSON.stringify({
         label: labelFilters,
       }),
     });
+
+    // Build sidecars are infrastructure, not agents — keep them out of the
+    // agent listing (they remain discoverable by label for cleanup).
+    const containers = allContainers.filter(
+      (c) => c.Labels?.[SIDECAR_ROLE_LABEL] !== SIDECAR_ROLE_VALUE
+    );
 
     if (containers.length === 0) {
       if (options.json) {

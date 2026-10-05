@@ -3,6 +3,7 @@ import { existsSync, readdirSync } from "fs";
 import { readYamlFile, writeYamlFile } from "./yaml";
 import type { AgentProfile, RunnerType, AgentType, ProviderType } from "../types/agent-profile";
 import { getLogger } from "../logger";
+import { parsePortSpec, presetPortSpecs } from "./ports";
 import { getPathProvider } from "./profile-paths";
 
 const logger = getLogger();
@@ -250,7 +251,7 @@ export function validateProfileDetailed(profile: unknown): ValidationResult {
     } else {
       const extra = p.extra as Record<string, unknown>;
 
-      // Validate port mappings format
+      // Validate port specs (docker run -p syntax; ${VAR} is checked after interpolation)
       if (extra.ports !== undefined) {
         if (!Array.isArray(extra.ports)) {
           errors.push("Profile field 'extra.ports' must be an array");
@@ -258,17 +259,41 @@ export function validateProfileDetailed(profile: unknown): ValidationResult {
           extra.ports.forEach((port, index) => {
             if (typeof port !== "string") {
               errors.push(`Profile field 'extra.ports[${index}]' must be a string`);
-            } else {
-              // Validate port format: host:container or host:container/protocol
-              const portPattern = /^\d+:\d+(\/\w+)?$/;
-              if (!portPattern.test(port)) {
+            } else if (!port.includes("${")) {
+              try {
+                parsePortSpec(port);
+              } catch (error) {
                 errors.push(
-                  `Invalid port mapping format: ${port}. Must be host:container or host:container/protocol`
+                  `Invalid port mapping 'extra.ports[${index}]': ${(error as Error).message}`
                 );
               }
             }
           });
         }
+      }
+
+      if (extra.port_presets !== undefined) {
+        if (!Array.isArray(extra.port_presets)) {
+          errors.push("Profile field 'extra.port_presets' must be an array");
+        } else {
+          try {
+            presetPortSpecs(extra.port_presets.map(String));
+          } catch (error) {
+            errors.push(`Profile field 'extra.port_presets': ${(error as Error).message}`);
+          }
+        }
+      }
+
+      if (extra.ports_host_ip !== undefined && typeof extra.ports_host_ip !== "string") {
+        errors.push("Profile field 'extra.ports_host_ip' must be a string");
+      }
+
+      if (
+        extra.ports_offset !== undefined &&
+        !Number.isInteger(Number(extra.ports_offset)) &&
+        !String(extra.ports_offset).includes("${")
+      ) {
+        errors.push("Profile field 'extra.ports_offset' must be an integer");
       }
     }
   }
@@ -311,11 +336,24 @@ export function validateProfileDetailed(profile: unknown): ValidationResult {
         if (!s.name || typeof s.name !== "string") {
           errors.push(`Profile field 'mcp[${index}].name' is required and must be a string`);
         }
-        if (!s.command || typeof s.command !== "string") {
-          errors.push(`Profile field 'mcp[${index}].command' is required and must be a string`);
-        }
-        if (s.args !== undefined && !Array.isArray(s.args)) {
-          errors.push(`Profile field 'mcp[${index}].args' must be an array`);
+        const isHttp = s.type === "http" || (!s.type && s.url && typeof s.url === "string");
+        if (isHttp) {
+          if (!s.url || typeof s.url !== "string") {
+            errors.push(`Profile field 'mcp[${index}].url' is required for http transport`);
+          }
+          if (
+            s.headers !== undefined &&
+            (typeof s.headers !== "object" || Array.isArray(s.headers))
+          ) {
+            errors.push(`Profile field 'mcp[${index}].headers' must be an object`);
+          }
+        } else {
+          if (!s.command || typeof s.command !== "string") {
+            errors.push(`Profile field 'mcp[${index}].command' is required and must be a string`);
+          }
+          if (s.args !== undefined && !Array.isArray(s.args)) {
+            errors.push(`Profile field 'mcp[${index}].args' must be an array`);
+          }
         }
         if (s.env !== undefined && (typeof s.env !== "object" || Array.isArray(s.env))) {
           errors.push(`Profile field 'mcp[${index}].env' must be an object`);

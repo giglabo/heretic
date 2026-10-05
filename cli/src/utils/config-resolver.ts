@@ -13,8 +13,10 @@ import type {
   SshConfig,
   McpServer,
   GitConfig,
+  ToolBackends,
 } from "../types/agent-profile";
-import { providerFromAgentType } from "../types/agent-profile";
+import { providerFromAgentType, SIDECAR_RUNTIMES } from "../types/agent-profile";
+import { buildPortMappings, formatPortMappings, type PortMapping } from "./ports";
 import { getLogger } from "../logger";
 
 const logger = getLogger();
@@ -31,6 +33,10 @@ export interface ResolveOptions {
   cliOverrides?: Partial<AgentProfile>;
   /** Session name for this run (default: "default") */
   sessionName?: string;
+  /** Port specs appended to the merged `extra.ports` (`--port`) */
+  addPorts?: string[];
+  /** Presets appended to the merged `extra.port_presets` (`--port-preset`) */
+  addPortPresets?: string[];
 }
 
 /**
@@ -82,6 +88,18 @@ export function resolveConfig(options: ResolveOptions): ResolvedAgentConfig {
     logger.debug("Merged CLI overrides");
   }
 
+  // 3b. CLI port flags add to the profile's ports instead of replacing them.
+  if (options.addPorts?.length || options.addPortPresets?.length) {
+    const extra = { ...(merged.extra || {}) };
+    if (options.addPorts?.length) {
+      extra.ports = [...(extra.ports || []), ...options.addPorts];
+    }
+    if (options.addPortPresets?.length) {
+      extra.port_presets = [...(extra.port_presets || []), ...options.addPortPresets];
+    }
+    merged = { ...merged, extra };
+  }
+
   // 4. Build variable context
   let variableContext = buildVariableContext(projectDir);
 
@@ -123,6 +141,13 @@ export function resolveConfig(options: ResolveOptions): ResolvedAgentConfig {
     );
   }
 
+  // 6c. Expand port presets, offset and host IP into the final port list.
+  const extra: AgentProfileExtra = { ...(interpolated.extra || {}) };
+  const portMappings = resolvePortMappings(extra);
+  if (portMappings) {
+    extra.ports = formatPortMappings(portMappings);
+  }
+
   // 7. Apply defaults for missing fields (trim strings to prevent whitespace issues)
   const resolved: ResolvedAgentConfig = {
     name: profileName,
@@ -138,9 +163,11 @@ export function resolveConfig(options: ResolveOptions): ResolvedAgentConfig {
     command: normalizeCommand(interpolated.command),
     interactive: interpolated.interactive !== undefined ? interpolated.interactive : true,
     tty: interpolated.tty !== undefined ? interpolated.tty : true,
-    extra: interpolated.extra || {},
+    extra,
+    portMappings,
     compose: interpolated.compose,
     ssh: interpolated.ssh,
+    toolBackends: interpolated.tool_backends,
     mcp: interpolated.mcp,
     mcpOverride: interpolated.mcp_override ?? false,
     git: interpolated.git,
@@ -155,8 +182,40 @@ export function resolveConfig(options: ResolveOptions): ResolvedAgentConfig {
     throw new Error(`Config validation failed: ${errors.join(", ")}`);
   }
 
+  // 9. Non-fatal warnings (a build spanning two filesystems is almost never
+  // what the user wants — spec gap B-5).
+  if (resolved.toolBackends?.sidecars?.length && resolved.ssh) {
+    logger.warn(
+      "Both build sidecars and the SSH backend are configured; a single build would span two different filesystems. Prefer one tool-execution backend per project (spec gap B-5)."
+    );
+  }
+
   logger.debug({ resolved }, "Config resolved successfully");
   return resolved;
+}
+
+/**
+ * Build the published-port list from `extra`. Returns undefined when the
+ * profile publishes nothing, so `extra.ports` stays as it was.
+ */
+function resolvePortMappings(extra: AgentProfileExtra): PortMapping[] | undefined {
+  if (!extra.ports?.length && !extra.port_presets?.length) {
+    return undefined;
+  }
+  const rawOffset = extra.ports_offset as number | string | undefined;
+  const offset = rawOffset === undefined || rawOffset === "" ? 0 : Number(rawOffset);
+  try {
+    return buildPortMappings({
+      ports: extra.ports,
+      presets: extra.port_presets,
+      hostIp: extra.ports_host_ip,
+      offset,
+    });
+  } catch (error) {
+    throw new Error(
+      `Config validation failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }
 
 /**
@@ -178,7 +237,7 @@ function normalizeCommand(command: string | string[] | undefined): string[] {
  * Rules:
  * - Replace fields: image, runner, volumes, workdir, command, interactive, tty
  * - Shallow merge fields: env, extra, extra.labels
- * - Replace within extra: ports, capabilities
+ * - Replace within extra: ports, port_presets, capabilities
  * - Deep merge: compose
  *
  * @param base - Base configuration
@@ -226,6 +285,9 @@ function mergeConfigs<T extends Partial<AgentProfile>>(
     if (overrideExtra.ports) {
       result.extra.ports = [...overrideExtra.ports];
     }
+    if (overrideExtra.port_presets) {
+      result.extra.port_presets = [...overrideExtra.port_presets];
+    }
     if (overrideExtra.capabilities) {
       result.extra.capabilities = [...overrideExtra.capabilities];
     }
@@ -245,6 +307,18 @@ function mergeConfigs<T extends Partial<AgentProfile>>(
       ...(base.ssh || {}),
       ...override.ssh,
     } as SshConfig;
+  }
+
+  // Merge: tool_backends (scalars replace; sidecars array replaces entirely)
+  if (override.tool_backends !== undefined) {
+    const merged: ToolBackends = {
+      ...(base.tool_backends || {}),
+      ...override.tool_backends,
+    };
+    if (override.tool_backends.sidecars !== undefined) {
+      merged.sidecars = override.tool_backends.sidecars.map((s) => ({ ...s }));
+    }
+    result.tool_backends = merged;
   }
 
   // Replace: mcp (array replaces entirely)
@@ -397,14 +471,62 @@ export function validateResolvedConfig(config: ResolvedAgentConfig): string[] {
     }
   }
 
+  // Validate tool_backends (build sidecars) if present
+  const sidecars = config.toolBackends?.sidecars;
+  if (sidecars && sidecars.length > 0) {
+    const workspaceTarget = config.toolBackends?.workspace_target || "/workspace";
+    const seenRuntimes = new Set<string>();
+
+    sidecars.forEach((sc, i) => {
+      // Runtime must be one of the five known keys (gap B-3: unknown keys route nothing)
+      if (!SIDECAR_RUNTIMES.includes(sc.runtime)) {
+        errors.push(
+          `tool_backends.sidecars[${i}].runtime '${sc.runtime}' is invalid (must be one of: ${SIDECAR_RUNTIMES.join(", ")})`
+        );
+      }
+      // Only one sidecar per runtime — BUILD_SIDECARS is keyed by runtime
+      if (seenRuntimes.has(sc.runtime)) {
+        errors.push(`tool_backends.sidecars[${i}]: duplicate runtime '${sc.runtime}'`);
+      }
+      seenRuntimes.add(sc.runtime);
+
+      if (!sc.image || sc.image.trim() === "") {
+        errors.push(`tool_backends.sidecars[${i}].image must be non-empty`);
+      }
+      if (sc.port !== undefined && (sc.port < 1 || sc.port > 65535)) {
+        errors.push(`tool_backends.sidecars[${i}].port must be between 1 and 65535`);
+      }
+    });
+
+    // Builders must share the agent's workspace by binding the SAME host path,
+    // so the "same filesystem" invariant holds (README §1). Fail fast if there
+    // is no volume for them to share.
+    const hasWorkspaceVolume = config.volumes.some((v) => v.target === workspaceTarget);
+    if (!hasWorkspaceVolume) {
+      errors.push(
+        `tool_backends: no volume targets '${workspaceTarget}' — build sidecars need the workspace bind-mounted so they share the agent's filesystem (add a volume with target: ${workspaceTarget})`
+      );
+    }
+
+    if (config.toolBackends?.ready_timeout !== undefined && config.toolBackends.ready_timeout < 1) {
+      errors.push("tool_backends.ready_timeout must be a positive number of seconds");
+    }
+  }
+
   // Validate MCP config if present
   if (config.mcp) {
     config.mcp.forEach((server: McpServer, index: number) => {
       if (!server.name || server.name.trim() === "") {
         errors.push(`mcp[${index}].name must be non-empty`);
       }
-      if (!server.command || server.command.trim() === "") {
-        errors.push(`mcp[${index}].command must be non-empty`);
+      if (server.type === "http") {
+        if (!server.url || server.url.trim() === "") {
+          errors.push(`mcp[${index}].url must be non-empty for http transport`);
+        }
+      } else {
+        if (!server.command || server.command.trim() === "") {
+          errors.push(`mcp[${index}].command must be non-empty`);
+        }
       }
     });
   }

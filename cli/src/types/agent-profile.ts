@@ -5,6 +5,8 @@
  * and resolved configuration used by the Docker runner system.
  */
 
+import type { PortMapping } from "../utils/ports";
+
 /**
  * Runner type discriminator
  */
@@ -105,15 +107,87 @@ export interface SshConfig {
 }
 
 /**
+ * Build-sidecar runtime keys.
+ *
+ * MUST be one of these five — the agent-side wrapper generator
+ * (`entrypoint.sh:setup_tool_wrappers`) only knows these runtimes, and any
+ * other key silently routes nothing (tool-execution-backends spec gap B-3).
+ */
+export type SidecarRuntime = "node" | "python" | "java" | "go" | "rust";
+
+/** Canonical list of valid sidecar runtimes (validation + iteration). */
+export const SIDECAR_RUNTIMES: readonly SidecarRuntime[] = ["node", "python", "java", "go", "rust"];
+
+/**
+ * A single HTTP build sidecar: a sibling container running an `exec-server`
+ * that shares the agent's workspace and provides one runtime's toolchain.
+ * The agent's tool wrappers (`npm`, `pip`, …) POST commands to it.
+ */
+export interface BuildSidecar {
+  /** Runtime key — MUST be one of node|python|java|go|rust (02-contracts §1) */
+  runtime: SidecarRuntime;
+  /** Builder image exposing the exec-server (e.g. heretic-builder-node:latest) */
+  image: string;
+  /** Port the exec-server listens on inside the container (default: 8080) */
+  port?: number;
+  /** Command override (default: exec-server -port <port> -cwd <workspace_target>) */
+  command?: string[];
+  /** Environment variables injected into the builder container */
+  env?: Record<string, string>;
+  /** Allowlist of env var names forwarded per-exec into builds (gap C-8) */
+  env_passthrough?: string[];
+  /** Named cache volumes for warm caches, as "<name>:<target>" (gap F-3) */
+  cache_volumes?: string[];
+  /** Raw compose healthcheck override (passed through verbatim) */
+  healthcheck?: Record<string, unknown>;
+}
+
+/**
+ * Tool-execution backend configuration.
+ *
+ * Currently models the HTTP build-sidecar backend. The SSH backend keeps its
+ * own top-level `ssh:` block; both resolve into the same wrapper mechanism
+ * inside the container.
+ */
+export interface ToolBackends {
+  /** Build sidecars, at most one per runtime */
+  sidecars?: BuildSidecar[];
+  /** Shared workspace mount target (must match a volume target; default "/workspace") */
+  workspace_target?: string;
+  /** Seconds to wait for each sidecar to become healthy (default: 60) */
+  ready_timeout?: number;
+  /**
+   * Run builders as the caller's uid:gid so build artefacts are caller-owned
+   * rather than root-owned (default: true, gap F-2).
+   */
+  run_as_caller_uid?: boolean;
+}
+
+/**
+ * MCP server transport type
+ */
+export type McpTransportType = "stdio" | "http";
+
+/**
  * MCP server configuration
+ *
+ * Supports two transport types:
+ * - **stdio** (default): requires `command`, optionally `args`
+ * - **http**: requires `url`, optionally `headers`
  */
 export interface McpServer {
   /** Server name (used as key in .mcp.json) */
   name: string;
-  /** Command to start the MCP server */
-  command: string;
-  /** Arguments to pass to the command */
+  /** Transport type (default: "stdio") */
+  type?: McpTransportType;
+  /** Command to start the MCP server (required for stdio) */
+  command?: string;
+  /** Arguments to pass to the command (stdio only) */
   args?: string[];
+  /** URL of the MCP server (required for http) */
+  url?: string;
+  /** HTTP headers for the MCP server (http only) */
+  headers?: Record<string, string>;
   /** Environment variables for the server */
   env?: Record<string, string>;
 }
@@ -146,8 +220,17 @@ export type SecretsConfig = Record<string, string>;
 export interface AgentProfileExtra {
   /** Docker network mode */
   network?: string;
-  /** Port mappings (host:container format) */
+  /**
+   * Published ports, `docker run -p` syntax: "3000", "3000-3020",
+   * "13000-13020:3000-3020", "127.0.0.1:8080:8080", "5353/udp"
+   */
   ports?: string[];
+  /** Named sets of typical dev ports (dev, web, debug, db, supabase, mail, all) */
+  port_presets?: string[];
+  /** Host interface for ports that don't name one (default: Docker's, all interfaces) */
+  ports_host_ip?: string;
+  /** Shift host ports of specs without an explicit host port, presets included */
+  ports_offset?: number;
   /** Linux capabilities to add */
   capabilities?: string[];
   /** Privileged mode */
@@ -202,6 +285,8 @@ export interface AgentProfile {
   compose?: ComposeConfig;
   /** SSH backend configuration */
   ssh?: SshConfig;
+  /** Tool-execution backends (HTTP build sidecars) */
+  tool_backends?: ToolBackends;
   /** MCP server configurations */
   mcp?: McpServer[];
   /** Path to a JSON file containing MCP server definitions (supports mcpServers, servers, or bare format) */
@@ -262,10 +347,17 @@ export interface ResolvedAgentConfig {
   tty: boolean;
   /** Additional Docker options */
   extra: AgentProfileExtra;
+  /**
+   * Published ports after expanding presets, offset and host IP; mirrored as
+   * compact specs in `extra.ports`. Undefined when nothing is published.
+   */
+  portMappings?: PortMapping[];
   /** Compose-specific configuration */
   compose?: ComposeConfig;
   /** SSH backend configuration */
   ssh?: SshConfig;
+  /** Tool-execution backends (HTTP build sidecars) */
+  toolBackends?: ToolBackends;
   /** MCP server configurations */
   mcp?: McpServer[];
   /** Override existing .mcp.json in workspace (default: false - skip if exists) */

@@ -11,8 +11,14 @@ import { createImageCommand } from "./commands/image";
 import { createMnemoniaCommand } from "./commands/mnemoria";
 import { runLocalValidate } from "./commands/local-validate";
 import { runDoctor } from "./commands/doctor";
-import { initLogger, getLogger } from "./logger";
+import { initLogger, getLogger, logRaw } from "./logger";
+import { listPortPresets, PORT_PRESET_GROUPS, PORT_PRESETS } from "./utils/ports";
 import { version } from "../package.json";
+
+/** Accumulate a repeatable option's values into an array. */
+function collectOption(value: string, previous: string[]): string[] {
+  return previous.concat([value]);
+}
 
 export function createProgram(): Command {
   const program = new Command();
@@ -65,6 +71,18 @@ export function createProgram(): Command {
     .option("--fix", "Automatically fix issues where possible")
     .action(async (options) => {
       await runDoctor({ fix: options.fix });
+    });
+
+  program
+    .command("port-presets")
+    .description("List the port presets for 'run --port-preset' and 'extra.port_presets'")
+    .action(() => {
+      for (const [name, members] of Object.entries(PORT_PRESET_GROUPS)) {
+        logRaw(`${name}: ${members.join(" + ")}`);
+      }
+      for (const [name, specs] of Object.entries(PORT_PRESETS)) {
+        logRaw(`${name}: ${specs.join(", ")}`);
+      }
     });
 
   program
@@ -128,6 +146,37 @@ export function createProgram(): Command {
     .option("-s, --session <name>", "Session name (default: 'default')")
     .option("--mcp <value>", "MCP server config (JSON string or path to .json file)")
     .option("--root", "Run the container as root (keeps /home/agent as HOME)")
+    .option(
+      "--sidecar <runtime>",
+      "Enable a build sidecar for a runtime (repeatable): node|python|java|go|rust",
+      collectOption,
+      []
+    )
+    .option(
+      "--builder-image <runtime=image>",
+      "Override the builder image for a runtime, e.g. node=my-builder:latest (repeatable)",
+      collectOption,
+      []
+    )
+    .option("--disable-sidecars", "Disable all build sidecars for this run")
+    .option(
+      "-p, --port <spec>",
+      "Publish a port or range, docker -p syntax: 3000, 3000-3020, 13000-13020:3000-3020, 127.0.0.1:8080:8080 (repeatable)",
+      collectOption,
+      []
+    )
+    .option(
+      "--port-preset <name>",
+      `Publish a preset of typical dev ports (repeatable, comma-separated): ${listPortPresets().join(", ")}`,
+      collectOption,
+      []
+    )
+    .option("--port-host-ip <ip>", "Host interface for ports that don't name one, e.g. 127.0.0.1")
+    .option(
+      "--port-offset <n>",
+      "Shift host ports of presets and same-port specs, e.g. 10000 publishes 3000 as 13000"
+    )
+    .option("--no-ports", "Ignore the profile's ports and presets for this run")
     .allowUnknownOption()
     .passThroughOptions()
     .action(async (agentName: string, command: string[], options) => {
@@ -141,6 +190,14 @@ export function createProgram(): Command {
         mcp: options.mcp,
         session: options.session,
         asRoot: options.root,
+        sidecar: options.sidecar,
+        builderImage: options.builderImage,
+        disableSidecars: options.disableSidecars,
+        port: options.port,
+        portPreset: options.portPreset,
+        portHostIp: options.portHostIp,
+        portOffset: options.portOffset,
+        ports: options.ports,
       });
     });
 
@@ -166,6 +223,7 @@ export function createProgram(): Command {
     const argv = process.argv.slice(3); // Skip node, script, and agent name
     const detach = argv.includes("--detach") || argv.includes("-d");
     const asRoot = argv.includes("--root") || undefined;
+    const disableSidecars = argv.includes("--disable-sidecars") || undefined;
 
     // Parse --session / -s
     let session: string | undefined;
@@ -176,15 +234,46 @@ export function createProgram(): Command {
       session = argv[sessionIdx + 1];
     }
 
+    // Collect all occurrences of a repeatable "--flag <value>" option.
+    const collectFlag = (flag: string): string[] => {
+      const out: string[] = [];
+      for (let i = 0; i < argv.length; i++) {
+        if (argv[i] === flag && i + 1 < argv.length) {
+          out.push(argv[i + 1]);
+        }
+      }
+      return out;
+    };
+    const sidecar = collectFlag("--sidecar");
+    const builderImage = collectFlag("--builder-image");
+
     // Find custom command after --
     const dashDashIndex = argv.indexOf("--");
     const customCommand = dashDashIndex >= 0 ? argv.slice(dashDashIndex + 1) : undefined;
+
+    // Port flags, only before `--` (after it everything belongs to the command).
+    const own = dashDashIndex >= 0 ? argv.slice(0, dashDashIndex) : argv;
+    const valuesOf = (...flags: string[]): string[] =>
+      own.flatMap((arg, i) => (flags.includes(arg) && i + 1 < own.length ? [own[i + 1]] : []));
+    const port = valuesOf("--port", "-p");
+    const portPreset = valuesOf("--port-preset");
+    const portHostIp = valuesOf("--port-host-ip").at(-1);
+    const portOffset = valuesOf("--port-offset").at(-1);
+    const ports = own.includes("--no-ports") ? false : undefined;
 
     await runAgent(unknownCommand, {
       detach,
       command: customCommand,
       session,
       asRoot,
+      sidecar,
+      builderImage,
+      disableSidecars,
+      port,
+      portPreset,
+      portHostIp,
+      portOffset,
+      ports,
     });
   });
 

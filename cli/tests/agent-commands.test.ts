@@ -6,6 +6,7 @@ import { createAgentsCommand } from "../src/commands/agents";
 import * as configResolver from "../src/utils/config-resolver";
 import * as dockerUtils from "../src/utils/docker";
 import * as DockerRunnerModule from "../src/runners/docker-runner";
+import { getAgentContainerName } from "../src/utils/session";
 
 describe("Agent Commands Integration", () => {
   let resolveConfigSpy: ReturnType<typeof spyOn>;
@@ -17,6 +18,9 @@ describe("Agent Commands Integration", () => {
   beforeEach(() => {
     // Mock config resolver
     resolveConfigSpy = spyOn(configResolver, "resolveConfig").mockReturnValue({
+      name: "test-profile",
+      sessionName: "default",
+      projectDir: "/test/project",
       image: "test/image:latest",
       runner: "docker",
       command: ["/bin/bash"],
@@ -97,6 +101,43 @@ describe("Agent Commands Integration", () => {
       expect(dockerRunnerStartSpy).toHaveBeenCalledWith({ detach: true });
 
       exitSpy.mockRestore();
+    });
+
+    it("refuses to start when the same profile + session is already running here", async () => {
+      const findSpy = spyOn(dockerUtils, "findContainerByName").mockResolvedValue({
+        Id: "live123",
+        Names: [`/${getAgentContainerName("test-profile", "default", "/test/project")}`],
+        State: "running",
+      } as any);
+      const previousExitCode = process.exitCode;
+
+      try {
+        await runAgent("test-profile", { detach: true });
+
+        expect(findSpy).toHaveBeenCalledWith(
+          getAgentContainerName("test-profile", "default", "/test/project")
+        );
+        expect(dockerRunnerStartSpy).not.toHaveBeenCalled();
+        expect(process.exitCode).toBe(1);
+      } finally {
+        process.exitCode = previousExitCode;
+        findSpy.mockRestore();
+      }
+    });
+
+    it("starts over a stopped container of the same session", async () => {
+      const findSpy = spyOn(dockerUtils, "findContainerByName").mockResolvedValue({
+        Id: "old123",
+        Names: [`/${getAgentContainerName("test-profile", "default", "/test/project")}`],
+        State: "exited",
+      } as any);
+
+      try {
+        await runAgent("test-profile", { detach: true });
+        expect(dockerRunnerStartSpy).toHaveBeenCalledWith({ detach: true });
+      } finally {
+        findSpy.mockRestore();
+      }
     });
   });
 

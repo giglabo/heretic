@@ -6,6 +6,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 heretic-cli — a CLI tool built with Bun and TypeScript that compiles to a native executable. Manages project initialization, local dev setup, and self-updates via GitHub releases.
 
+## ⚠ Mnemoria is scheduled for removal — archive the branch, don't extend it
+
+The `mnemoria` (`mn`) command group is **not part of heretic-cli's scope** and must be
+**dropped**. It exists only in the branch `feat/mnemoria` (commit `441cea2 "Add Mnemoria
+memory server client"`); `main` has no mnemoria code and no registration in `cli.ts`.
+
+**Rules for agents working in this repo:**
+
+- **Do not add, extend, refactor, or document mnemoria code.** Do not merge `feat/mnemoria`
+  into `main`. Treat any mnemoria file as frozen.
+- The branch is to be **archived, not merged**. Documentation is already archived in the
+  watchword MCP (never expires):
+  - word `mnemoria` → `mnemoria-skills-feat-mnemoria-441cea2.tar.gz` (the four mnemoria skill docs)
+  - word `heretic-skills` → `heretic-cli-skills.tar.gz` (all `.claude/skills/`, mnemoria included)
+  - word `heretic-docs` → text index (skill catalog + findings)
+  Suggested branch archive tag before deletion:
+  `git tag archive/feat-mnemoria 441cea2 && git push origin archive/feat-mnemoria`.
+- When asked to remove it, delete **all** of these and nothing else:
+  - `cli/src/commands/mnemoria/` (16 files)
+  - `cli/tests/mnemoria/` (8 test files)
+  - `cli/src/cli.ts` — the `createMnemoniaCommand` import (line ~11) and its
+    `program.addCommand(...)` call (line ~125–126)
+  - `cli/src/commands/index.ts` — the `createMnemoniaCommand` re-export
+  Then `bun run format && bun run lint && bun test && bun run build`.
+- `.claude/skills/heretic-mnemoria*` are archived docs for that branch, kept deliberately.
+  They are marked branch-only; remove them together with the code, not before.
+
 ## Commands
 
 All commands run from `cli/` directory:
@@ -92,9 +119,13 @@ When configuring an Anthropic agent with a token, the user selects the type:
 
 For non-copilot agents, the docker-runner seeds `.claude.json` with `{ "hasCompletedOnboarding": true }` to skip Claude Code's interactive login screen. This file is bind-mounted to `/home/agent/.claude.json` and `/root/.claude.json`.
 
+### Sessions (several agents in one folder)
+
+The agent container is `heretic-<profile>-<session>-<hash8>` (`getAgentContainerName()` in `src/utils/session.ts`; `hash8` = SHA-256 of the project dir), and the compose runner's project name is `heretic-<profile>-<session>-<hash8>` too. `run` refuses (exit 1) to start a profile + session that is already running in the same folder (`ensureSessionFree()` in `run-agent.ts`), because the runners replace a same-named container; a stopped one is still recreated. Two agents on one profile in one folder need different `-s <session>` values; each session gets its own `.heretic/temp/<session>/` (`~/.claude`), container and sidecar network, but shares the workspace mount.
+
 ### Running as Root
 
-Set `extra.run_as_root: true` on a profile (or pass `--root` to `heretic-cli run <agent>` for a one-off override) to keep the container running as root rather than as the image's `agent` user. The `--root` flag only applies when explicitly passed, so it never clobbers a profile's value. The runners force `User: root`, inject `HERETIC_RUN_AS_ROOT=1`, and **bind-mount the current (binary-embedded) `entrypoint.sh` over the image's baked `/opt/heretic/entrypoint.sh`** so the flag works without rebuilding the image. The entrypoint's root-mode block then exports `HOME=/home/agent` and `USER=root`, so all bind-mounted config (claude settings, `.claude.json`, auth, ssh keys) keeps resolving under `$HOME`. (Note: `docker exec` into the container shows `HOME=/root` because it's a fresh login that doesn't inherit the entrypoint's exported env — the actual session shell, PID 1, has `HOME=/home/agent`.)
+Set `extra.run_as_root: true` on a profile (or pass `--root` to `heretic-cli run <agent>` for a one-off override) to keep the container running as root rather than as the image's `agent` user. The `--root` flag only applies when explicitly passed, so it never clobbers a profile's value. The runners force `User: root`, inject `HERETIC_RUN_AS_ROOT=1`, and **bind-mount the current (binary-embedded) `entrypoint.sh` over the image's baked `/entrypoint.sh`** (the image's `ENTRYPOINT`) so the flag works without rebuilding the image. The entrypoint's root-mode block then exports `HOME=/home/agent` and `USER=root`, so all bind-mounted config (claude settings, `.claude.json`, auth, ssh keys) keeps resolving under `$HOME`. (Note: `docker exec` into the container shows `HOME=/root` because it's a fresh login that doesn't inherit the entrypoint's exported env — the actual session shell, PID 1, has `HOME=/home/agent`.)
 
 
 ## Documentation Requirements

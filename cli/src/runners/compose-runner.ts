@@ -5,17 +5,22 @@
  * and shelling out to `docker compose` CLI for multi-container scenarios.
  */
 
-import { createHash } from "node:crypto";
 import { writeFileSync, readFileSync, unlinkSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ResolvedAgentConfig } from "../types/agent-profile";
 import type { Runner, RunResult } from "./types";
 import { stringifyYaml } from "../utils/yaml";
-import { writeMcpFile, cleanupMcpFile, getMcpMountPaths, getExistingMcpPath } from "./mcp-helper";
-import { getDockerSocketPath } from "../utils/docker";
+import {
+  writeMcpFile,
+  cleanupMcpFile,
+  getMcpMountPaths,
+  getExistingMcpPath,
+  hasUsableMcpConfig,
+} from "./mcp-helper";
+import { getDockerSocketMountSource } from "../utils/docker";
 import { loadSettings, resolveToken } from "../utils/settings";
-import { ensureSessionDir, sanitizeSessionName } from "../utils/session";
+import { ensureSessionDir, getAgentContainerName, projectDirHash } from "../utils/session";
 import { generateEntrypoint } from "../templates";
 import { getLogger } from "../logger";
 
@@ -31,8 +36,10 @@ export class ComposeRunner implements Runner {
   private projectName: string;
 
   constructor(private config: ResolvedAgentConfig) {
-    // Generate compose project name: heretic-<agent-name>-<session> (sanitized)
-    this.projectName = `heretic-${this.sanitizeProjectName(config.name)}-${this.sanitizeProjectName(config.sessionName)}`;
+    // Generate compose project name: heretic-<agent-name>-<session>-<hash8> (sanitized).
+    // The project-dir hash keeps the same profile + session in two folders from
+    // sharing (and recreating) one compose project.
+    this.projectName = `heretic-${this.sanitizeProjectName(config.name)}-${this.sanitizeProjectName(config.sessionName)}-${projectDirHash(config.projectDir)}`;
   }
 
   async start(options?: { detach?: boolean; command?: string[] }): Promise<RunResult> {
@@ -264,7 +271,7 @@ export class ComposeRunner implements Runner {
       const entrypointPath = join(sessionDir, "entrypoint.sh");
       writeFileSync(entrypointPath, generateEntrypoint());
       chmodSync(entrypointPath, 0o755);
-      volumes.push(`${entrypointPath}:/opt/heretic/entrypoint.sh:ro`);
+      volumes.push(`${entrypointPath}:/entrypoint.sh:ro`);
     }
 
     // SSH config → env vars + key bind
@@ -281,10 +288,21 @@ export class ComposeRunner implements Runner {
       }
     }
 
+    // Build sidecars → BUILD_SIDECARS env for the agent's tool wrappers, plus
+    // sibling builder services (added to composeSpec below). See the
+    // tool-execution-backends plan (Phase 3) and 02-contracts §1.
+    const sidecarOrch = this.buildSidecarOrchestration();
+    if (sidecarOrch) {
+      environment.BUILD_SIDECARS = sidecarOrch.buildSidecars;
+      if (sidecarOrch.envPassthrough) {
+        environment.SIDECAR_ENV_PASSTHROUGH = sidecarOrch.envPassthrough;
+      }
+    }
+
     // MCP config → temp file + bind (skip if existing MCP config found in workspace unless override enabled)
     if (config.mcp && config.mcp.length > 0) {
       const existingMcpPath = getExistingMcpPath(config.agentType, config.projectDir);
-      const shouldMount = config.mcpOverride || !existsSync(existingMcpPath);
+      const shouldMount = config.mcpOverride || !hasUsableMcpConfig(existingMcpPath);
 
       if (shouldMount) {
         const mcpMountPaths = getMcpMountPaths(config.agentType);
@@ -342,8 +360,9 @@ export class ComposeRunner implements Runner {
 
     // DinD → docker.sock bind
     if (config.dind) {
-      const dockerSocketPath = getDockerSocketPath();
-      volumes.push(`${dockerSocketPath}:/var/run/docker.sock`);
+      const dockerSocketSource = getDockerSocketMountSource();
+      volumes.push(`${dockerSocketSource}:/var/run/docker.sock`);
+      logger.info(`Docker-in-Docker: mounting ${dockerSocketSource} → /var/run/docker.sock`);
     }
 
     // Claude settings → merge to session dir as settings.json
@@ -419,6 +438,13 @@ export class ComposeRunner implements Runner {
       agentService.command = cmd;
     }
 
+    // Gate the agent on each builder's health so wrappers only fire once the
+    // sidecars answer /health — replaces the reference orchestrator's manual
+    // wait_healthy() polling loop.
+    if (sidecarOrch) {
+      agentService.depends_on = sidecarOrch.dependsOn;
+    }
+
     if (extra.network) {
       agentService.network_mode = extra.network;
     }
@@ -475,12 +501,14 @@ export class ComposeRunner implements Runner {
       agentService.shm_size = extra.shm_size;
     }
 
-    // Build compose spec
+    // Build compose spec. Builder sidecars are added after the user's own
+    // compose.services so heretic's orchestration wins on any name collision.
     const composeSpec: Record<string, unknown> = {
       version: "3.8",
       services: {
         agent: agentService,
         ...(config.compose?.services || {}),
+        ...(sidecarOrch?.services || {}),
       },
     };
 
@@ -489,7 +517,151 @@ export class ComposeRunner implements Runner {
       composeSpec.networks = config.compose.networks;
     }
 
+    // Declare named volumes (user-provided + sidecar cache volumes). Compose
+    // requires named volumes referenced by services to be declared here.
+    const namedVolumes: Record<string, unknown> = {
+      ...((config.compose?.volumes as Record<string, unknown>) || {}),
+      ...(sidecarOrch?.namedVolumes || {}),
+    };
+    if (Object.keys(namedVolumes).length > 0) {
+      composeSpec.volumes = namedVolumes;
+    }
+
     return stringifyYaml(composeSpec);
+  }
+
+  /**
+   * Build compose service definitions for the configured build sidecars plus
+   * the pieces the agent service needs to reach them:
+   *   - one `builder-<runtime>` service per sidecar, sharing the SAME workspace
+   *     bind as the agent so both see one filesystem (README §1 invariant);
+   *   - the BUILD_SIDECARS env value in the normative shape
+   *     `{"<runtime>":{"internal_url":"http://builder-<runtime>:<port>"}}`
+   *     (02-contracts §1);
+   *   - a depends_on map gating the agent on each builder's health;
+   *   - the SIDECAR_ENV_PASSTHROUGH allowlist (union across runtimes, gap C-8);
+   *   - any named cache volumes to declare at the top level (gap F-3).
+   *
+   * Returns undefined when no sidecars are configured.
+   */
+  private buildSidecarOrchestration():
+    | {
+        services: Record<string, unknown>;
+        buildSidecars: string;
+        dependsOn: Record<string, { condition: string }>;
+        envPassthrough: string;
+        namedVolumes: Record<string, unknown>;
+      }
+    | undefined {
+    const tb = this.config.toolBackends;
+    if (!tb?.sidecars || tb.sidecars.length === 0) {
+      return undefined;
+    }
+
+    const workspaceTarget = tb.workspace_target || "/workspace";
+    const workspaceVol = this.config.volumes.find((v) => v.target === workspaceTarget);
+    if (!workspaceVol) {
+      // Validation (config-resolver) should have caught this; guard anyway.
+      throw new Error(
+        `tool_backends: no volume targets '${workspaceTarget}'; cannot share the workspace with build sidecars`
+      );
+    }
+    const workspaceBind = `${workspaceVol.source}:${workspaceTarget}`;
+
+    if (this.config.extra?.network) {
+      logger.warn(
+        { network: this.config.extra.network },
+        "Agent uses a custom network_mode; build-sidecar service names may not resolve unless the builders share that network"
+      );
+    }
+
+    const runAsCallerUid = tb.run_as_caller_uid !== false; // default true
+    const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
+    const gid = typeof process.getgid === "function" ? process.getgid() : 1000;
+    const readyTimeout = tb.ready_timeout ?? 60;
+
+    const services: Record<string, unknown> = {};
+    const dependsOn: Record<string, { condition: string }> = {};
+    const buildSidecarsObj: Record<string, { internal_url: string }> = {};
+    const passthrough = new Set<string>();
+    const namedVolumes: Record<string, unknown> = {};
+
+    for (const sc of tb.sidecars) {
+      const port = sc.port ?? 8080;
+      const serviceName = `builder-${sc.runtime}`;
+
+      // Builder env: user-provided, plus a writable HOME so toolchains don't try
+      // to write to a home dir that doesn't exist for an arbitrary caller uid.
+      const env: Record<string, string> = { ...(sc.env || {}) };
+      if (runAsCallerUid && env.HOME === undefined) {
+        env.HOME = `${workspaceTarget}/.heretic-home/${sc.runtime}`;
+      }
+
+      // Volumes: the SHARED workspace bind + any named cache volumes.
+      const volumes: string[] = [workspaceBind];
+      for (const cv of sc.cache_volumes || []) {
+        volumes.push(cv);
+        const volName = cv.split(":")[0];
+        // Declare named volumes; skip host-path binds (absolute / relative / ~).
+        if (
+          volName &&
+          !volName.startsWith("/") &&
+          !volName.startsWith(".") &&
+          !volName.startsWith("~")
+        ) {
+          namedVolumes[volName] = null;
+        }
+      }
+
+      const command = sc.command ?? ["exec-server", "-port", String(port), "-cwd", workspaceTarget];
+
+      const healthcheck = sc.healthcheck ?? {
+        test: ["CMD", "exec-server", "-healthcheck", "-port", String(port)],
+        interval: "2s",
+        timeout: "3s",
+        retries: Math.max(1, Math.ceil(readyTimeout / 2)),
+        start_period: "2s",
+      };
+
+      const service: Record<string, unknown> = {
+        image: sc.image,
+        command,
+        working_dir: workspaceTarget,
+        environment: env,
+        volumes,
+        healthcheck,
+        // Local private compose network: drop caps + no privilege escalation to
+        // blunt the unauthenticated-exec risk (gaps C-9, F-2). Do NOT publish
+        // ports — builders are reachable only by service name.
+        cap_drop: ["ALL"],
+        security_opt: ["no-new-privileges:true"],
+        restart: "no",
+        labels: {
+          "heretic.managed": "true",
+          "heretic.agent": this.config.name,
+          "heretic.role": "build-sidecar",
+          "heretic.runtime": sc.runtime,
+        },
+      };
+      if (runAsCallerUid) {
+        service.user = `${uid}:${gid}`;
+      }
+
+      services[serviceName] = service;
+      dependsOn[serviceName] = { condition: "service_healthy" };
+      buildSidecarsObj[sc.runtime] = { internal_url: `http://${serviceName}:${port}` };
+      for (const name of sc.env_passthrough || []) {
+        passthrough.add(name);
+      }
+    }
+
+    return {
+      services,
+      buildSidecars: JSON.stringify(buildSidecarsObj),
+      dependsOn,
+      envPassthrough: [...passthrough].join(","),
+      namedVolumes,
+    };
   }
 
   /**
@@ -535,10 +707,7 @@ export class ComposeRunner implements Runner {
    * Generate container name: heretic-<agent>-<session>-<hash8>
    */
   private generateContainerName(): string {
-    const agent = this.config.name.replace(/[^a-zA-Z0-9_-]/g, "-");
-    const session = sanitizeSessionName(this.config.sessionName);
-    const hash = createHash("sha256").update(this.config.projectDir).digest("hex").substring(0, 8);
-    return `heretic-${agent}-${session}-${hash}`;
+    return getAgentContainerName(this.config.name, this.config.sessionName, this.config.projectDir);
   }
 
   /**

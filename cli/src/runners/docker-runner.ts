@@ -8,25 +8,33 @@
 
 import type Docker from "dockerode";
 import type { ContainerCreateOptions } from "dockerode";
-import { createHash } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ResolvedAgentConfig } from "../types/agent-profile";
 import type { Runner, RunResult } from "./types";
 import {
   getDockerClient,
-  getDockerSocketPath,
+  getDockerSocketMountSource,
   isDockerAvailable,
   pullImage,
   stopContainer,
   removeContainer,
+  findContainerByName,
 } from "../utils/docker";
-import { writeMcpFile, cleanupMcpFile, getMcpMountPaths, getExistingMcpPath } from "./mcp-helper";
+import {
+  writeMcpFile,
+  cleanupMcpFile,
+  getMcpMountPaths,
+  getExistingMcpPath,
+  hasUsableMcpConfig,
+} from "./mcp-helper";
+import { SidecarManager, type SidecarWiring } from "./sidecar-manager";
 import { loadSettings, resolveToken } from "../utils/settings";
-import { ensureSessionDir, sanitizeSessionName } from "../utils/session";
+import { ensureSessionDir, getAgentContainerName } from "../utils/session";
 import { generateEntrypoint } from "../templates";
 import { getLogger } from "../logger";
+import { toDockerPortConfig } from "../utils/ports";
 
 const logger = getLogger();
 
@@ -37,6 +45,7 @@ export class DockerRunner implements Runner {
   private docker: Docker;
   private containerId?: string;
   private mcpFilePath?: string;
+  private sidecarManager?: SidecarManager;
 
   constructor(private config: ResolvedAgentConfig) {
     this.docker = getDockerClient();
@@ -55,8 +64,17 @@ export class DockerRunner implements Runner {
       // Check if image exists locally, pull if not
       await this.ensureImage();
 
+      // Build sidecars (dockerode-native): create the shared network + builder
+      // containers and wait until each is healthy BEFORE the agent starts — the
+      // parity equivalent of compose's `depends_on: { condition: service_healthy }`.
+      let sidecarWiring: SidecarWiring | undefined;
+      if (this.config.toolBackends?.sidecars?.length) {
+        this.sidecarManager = new SidecarManager(this.config, this.docker);
+        sidecarWiring = await this.sidecarManager.start();
+      }
+
       // Create container with translated config
-      const containerOptions = this.translateConfig(command);
+      const containerOptions = this.translateConfig(command, sidecarWiring);
       const containerName = this.generateContainerName();
 
       logger.debug({ containerOptions, containerName }, "Creating container");
@@ -103,6 +121,16 @@ export class DockerRunner implements Runner {
         this.mcpFilePath = undefined;
       }
 
+      // Tear down any build sidecars we brought up for this (failed) run
+      if (this.sidecarManager) {
+        try {
+          await this.sidecarManager.stop();
+        } catch (sidecarError) {
+          logger.debug({ error: sidecarError }, "Failed to clean up build sidecars");
+        }
+        this.sidecarManager = undefined;
+      }
+
       this.handleError(error);
       throw error;
     }
@@ -128,6 +156,14 @@ export class DockerRunner implements Runner {
       if (this.mcpFilePath) {
         cleanupMcpFile(this.mcpFilePath);
         this.mcpFilePath = undefined;
+      }
+
+      // Tear down build sidecars + their network (in-process case). The
+      // detached / separate-process case is handled by `heretic-cli stop` via
+      // SidecarManager.teardown() on the shared labels.
+      if (this.sidecarManager) {
+        await this.sidecarManager.stop();
+        this.sidecarManager = undefined;
       }
 
       this.containerId = undefined;
@@ -260,8 +296,7 @@ export class DockerRunner implements Runner {
    */
   private async removeExistingContainer(containerName: string): Promise<void> {
     try {
-      const containers = await this.docker.listContainers({ all: true });
-      const existing = containers.find((c) => c.Names.some((name) => name === `/${containerName}`));
+      const existing = await findContainerByName(containerName, this.docker);
 
       if (existing) {
         logger.info({ containerName }, "Removing existing container");
@@ -279,7 +314,10 @@ export class DockerRunner implements Runner {
   /**
    * Translate ResolvedAgentConfig to dockerode ContainerCreateOptions
    */
-  private translateConfig(commandOverride?: string[]): ContainerCreateOptions {
+  private translateConfig(
+    commandOverride?: string[],
+    sidecarWiring?: SidecarWiring
+  ): ContainerCreateOptions {
     const { config } = this;
     const extra = config.extra || {};
 
@@ -362,6 +400,16 @@ export class DockerRunner implements Runner {
       env.push("HERETIC_RUN_AS_ROOT=1");
     }
 
+    // Build-sidecar wiring: the agent resolves each builder by its network alias
+    // (`http://builder-<runtime>:<port>`), so it must carry BUILD_SIDECARS and the
+    // env passthrough allowlist and join the shared network (handled below).
+    if (sidecarWiring) {
+      env.push(`BUILD_SIDECARS=${sidecarWiring.buildSidecars}`);
+      if (sidecarWiring.envPassthrough) {
+        env.push(`SIDECAR_ENV_PASSTHROUGH=${sidecarWiring.envPassthrough}`);
+      }
+    }
+
     // Log env var names (not values for security)
     logger.info({ envVars: Object.keys(envMap) }, "Environment variables being set");
     // Debug: log env var values (masked) for troubleshooting
@@ -380,8 +428,8 @@ export class DockerRunner implements Runner {
     // baked one so the flag works without rebuilding the image. The entrypoint
     // honors HERETIC_RUN_AS_ROOT to stay root with HOME=/home/agent.
     if (config.extra?.run_as_root) {
-      const entrypointPath = this.writeEntrypointOverride(config);
-      binds.push(`${entrypointPath}:/opt/heretic/entrypoint.sh:ro`);
+      const entrypointPath = this.writeEntrypointOverride();
+      binds.push(`${entrypointPath}:/entrypoint.sh:ro`);
       logger.debug({ entrypointPath }, "Mounting run-as-root entrypoint override");
     }
 
@@ -402,7 +450,7 @@ export class DockerRunner implements Runner {
     // MCP config → temp file + bind (skip if existing MCP config found in workspace unless override enabled)
     if (config.mcp && config.mcp.length > 0) {
       const existingMcpPath = getExistingMcpPath(config.agentType, config.projectDir);
-      const shouldMount = config.mcpOverride || !existsSync(existingMcpPath);
+      const shouldMount = config.mcpOverride || !hasUsableMcpConfig(existingMcpPath);
 
       if (shouldMount) {
         const mcpMountPaths = getMcpMountPaths(config.agentType);
@@ -436,8 +484,9 @@ export class DockerRunner implements Runner {
 
     // DinD → docker.sock bind
     if (config.dind) {
-      const dockerSocketPath = getDockerSocketPath();
-      binds.push(`${dockerSocketPath}:/var/run/docker.sock`);
+      const dockerSocketSource = getDockerSocketMountSource();
+      binds.push(`${dockerSocketSource}:/var/run/docker.sock`);
+      logger.info(`Docker-in-Docker: mounting ${dockerSocketSource} → /var/run/docker.sock`);
     }
 
     // Claude settings → merge to session dir as settings.json
@@ -491,14 +540,17 @@ export class DockerRunner implements Runner {
       "heretic.agent": this.config.name,
       "heretic.project": this.config.projectDir,
       "heretic.session": this.config.sessionName,
+      ...(sidecarWiring ? { "heretic.network": sidecarWiring.networkName } : {}),
       ...(extra.labels || {}),
     };
 
-    // Translate port bindings
-    let portBindings: Record<string, Array<{ HostPort: string }>> | undefined;
-    if (extra.ports) {
-      portBindings = this.translatePorts(extra.ports);
-    }
+    // Translate port bindings (ranges, remaps, bind IPs, protocols)
+    const ports = extra.ports?.length ? toDockerPortConfig(extra.ports) : undefined;
+
+    // Join the build-sidecar network so `builder-<runtime>` aliases resolve. A
+    // user-pinned network_mode wins (the manager warned that siblings may be
+    // unreachable in that case).
+    const networkMode = extra.network || (sidecarWiring ? sidecarWiring.networkName : undefined);
 
     const options: ContainerCreateOptions = {
       Image: config.image,
@@ -506,6 +558,7 @@ export class DockerRunner implements Runner {
       WorkingDir: config.workdir,
       Env: env,
       Labels: labels,
+      ExposedPorts: ports?.exposedPorts,
       OpenStdin: config.interactive,
       Tty: config.tty,
       AttachStdin: config.interactive,
@@ -513,8 +566,8 @@ export class DockerRunner implements Runner {
       AttachStderr: true,
       HostConfig: {
         Binds: binds,
-        NetworkMode: extra.network,
-        PortBindings: portBindings,
+        NetworkMode: networkMode,
+        PortBindings: ports?.portBindings,
         CapAdd: extra.capabilities,
         Privileged: extra.privileged,
         Memory: memory,
@@ -530,12 +583,16 @@ export class DockerRunner implements Runner {
 
   /**
    * Write the embedded entrypoint to the session dir and return its host path.
-   * Bind-mounted over the image's baked /opt/heretic/entrypoint.sh so the
-   * run_as_root branch works on images built before the feature existed.
+   * Bind-mounted over the image's baked /entrypoint.sh so the run_as_root branch
+   * works on images built before the feature existed.
    */
-  private writeEntrypointOverride(config: ResolvedAgentConfig): string {
-    const sessionDir = ensureSessionDir(config.projectDir, config.sessionName);
-    const entrypointPath = join(sessionDir, "entrypoint.sh");
+  private writeEntrypointOverride(): string {
+    // Keep it OUT of the session dir: that dir is also bind-mounted as ~/.claude and
+    // its .claude.json is file-mounted; an extra file bind from the same directory
+    // makes Docker Desktop (virtiofs) mis-resolve mountpoints ("outside of rootfs").
+    const dir = join(homedir(), ".heretic", "entrypoints");
+    mkdirSync(dir, { recursive: true });
+    const entrypointPath = join(dir, "entrypoint.sh");
     writeFileSync(entrypointPath, generateEntrypoint());
     chmodSync(entrypointPath, 0o755);
     return entrypointPath;
@@ -545,10 +602,7 @@ export class DockerRunner implements Runner {
    * Generate container name: heretic-<agent>-<session>-<hash8>
    */
   private generateContainerName(): string {
-    const agent = this.config.name.replace(/[^a-zA-Z0-9_-]/g, "-");
-    const session = sanitizeSessionName(this.config.sessionName);
-    const hash = createHash("sha256").update(this.config.projectDir).digest("hex").substring(0, 8);
-    return `heretic-${agent}-${session}-${hash}`;
+    return getAgentContainerName(this.config.name, this.config.sessionName, this.config.projectDir);
   }
 
   /**
@@ -663,30 +717,6 @@ export class DockerRunner implements Runner {
       throw new Error(`Invalid CPU value: ${cpus}`);
     }
     return Math.floor(value * 1e9);
-  }
-
-  /**
-   * Translate port array (e.g., ["8080:80", "3000"]) to PortBindings
-   */
-  private translatePorts(ports: string[]): Record<string, Array<{ HostPort: string }>> {
-    const bindings: Record<string, Array<{ HostPort: string }>> = {};
-
-    for (const port of ports) {
-      const parts = port.split(":");
-      if (parts.length === 1) {
-        // Format: "8080" -> bind same port
-        const containerPort = parts[0];
-        bindings[`${containerPort}/tcp`] = [{ HostPort: containerPort }];
-      } else if (parts.length === 2) {
-        // Format: "8080:80" -> bind host:container
-        const [hostPort, containerPort] = parts;
-        bindings[`${containerPort}/tcp`] = [{ HostPort: hostPort }];
-      } else {
-        throw new Error(`Invalid port format: ${port}`);
-      }
-    }
-
-    return bindings;
   }
 
   /**

@@ -31,3 +31,6 @@ coverage/
 *.key
 *.p12
 *.pfx
+
+# Bun compile temp files (left behind by interrupted `bun build --compile`)
+.*.bun-build

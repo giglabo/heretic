@@ -6,13 +6,14 @@
  */
 
 import { Command } from "commander";
-import { mkdtemp, writeFile, chmod, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 
 import { getLogger, logRaw } from "../logger";
 import { isDockerAvailable } from "../utils/docker";
+import { SIDECAR_RUNTIMES, type SidecarRuntime } from "../types/agent-profile";
 import {
   type ImageAgentType,
   type ImageBuildConfig,
@@ -21,8 +22,14 @@ import {
   defaultImageBuildConfig,
   generateDockerfile,
   generateEntrypoint,
-  SIDECAR_EXEC_STUB,
+  SIDECAR_EXEC_SCRIPT,
   SSH_EXEC_SCRIPT,
+  EXEC_SERVER_MAIN_GO,
+  EXEC_SERVER_GO_MOD,
+  generateSidecarDockerfile,
+  defaultSidecarRuntimeVersion,
+  sidecarRuntimeTools,
+  isSidecarRuntime,
 } from "../templates";
 
 // ---------------------------------------------------------------------------
@@ -213,8 +220,8 @@ async function prepareBuildDir(
   await writeFile(join(buildDir, "entrypoint.sh"), entrypoint);
   await chmod(join(buildDir, "entrypoint.sh"), 0o755);
 
-  // Sidecar exec stub (compiled binary cannot embed external assets)
-  await writeFile(join(buildDir, "sidecar-exec"), SIDECAR_EXEC_STUB);
+  // Sidecar exec client (routes wrapped commands to an HTTP build sidecar)
+  await writeFile(join(buildDir, "sidecar-exec"), SIDECAR_EXEC_SCRIPT);
   await chmod(join(buildDir, "sidecar-exec"), 0o755);
 
   // SSH exec script
@@ -351,12 +358,11 @@ async function runImageBuild(options: Record<string, unknown>): Promise<void> {
       logRaw("  # Interactive mode");
       logRaw(`  docker run -it --rm ${name}`);
       logRaw("");
-      logRaw("  # Workflow mode");
+      logRaw("  # Workflow mode (the baked ENTRYPOINT switches to it when PROMPT_FILE is set)");
       logRaw("  docker run -it --rm \\");
       logRaw("    -e PROMPT_FILE=/workspace/prompt.md \\");
       logRaw("    -e REPO_PATH=/workspace \\");
       logRaw("    -v $(pwd):/workspace \\");
-      logRaw("    --entrypoint /home/agent/entrypoint.sh \\");
       logRaw(`    ${name}`);
       logRaw("");
     }
@@ -367,11 +373,24 @@ async function runImageBuild(options: Record<string, unknown>): Promise<void> {
 // Command: image generate
 // ---------------------------------------------------------------------------
 
-type GenerateFormat = "dockerfile" | "entrypoint" | "ssh-exec" | "sidecar-exec";
+type GenerateFormat =
+  | "dockerfile"
+  | "entrypoint"
+  | "ssh-exec"
+  | "sidecar-exec"
+  | "sidecar-dockerfile"
+  | "exec-server";
 
 async function runImageGenerate(options: Record<string, unknown>): Promise<void> {
   const format = (options.format as string) ?? "dockerfile";
-  const validFormats: GenerateFormat[] = ["dockerfile", "entrypoint", "ssh-exec", "sidecar-exec"];
+  const validFormats: GenerateFormat[] = [
+    "dockerfile",
+    "entrypoint",
+    "ssh-exec",
+    "sidecar-exec",
+    "sidecar-dockerfile",
+    "exec-server",
+  ];
 
   if (!validFormats.includes(format as GenerateFormat)) {
     const logger = getLogger();
@@ -394,8 +413,207 @@ async function runImageGenerate(options: Record<string, unknown>): Promise<void>
       logRaw(SSH_EXEC_SCRIPT);
       break;
     case "sidecar-exec":
-      logRaw(SIDECAR_EXEC_STUB);
+      logRaw(SIDECAR_EXEC_SCRIPT);
       break;
+    case "sidecar-dockerfile": {
+      const runtime = (options.runtime as string) ?? "node";
+      if (!isSidecarRuntime(runtime)) {
+        const logger = getLogger();
+        logger.error(
+          `Invalid sidecar runtime '${runtime}'. Use one of: ${SIDECAR_RUNTIMES.join(", ")}`
+        );
+        process.exit(1);
+      }
+      logRaw(
+        generateSidecarDockerfile({
+          runtime,
+          runtimeVersion: options.runtimeVersion as string | undefined,
+          goBuilderImage: options.goBuilder as string | undefined,
+          port: options.port ? Number(options.port) : undefined,
+        })
+      );
+      break;
+    }
+    case "exec-server":
+      logRaw(EXEC_SERVER_MAIN_GO);
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Command: image build-sidecar <runtime>
+// ---------------------------------------------------------------------------
+
+interface SidecarBuildConfig {
+  runtime: SidecarRuntime;
+  imageName: string;
+  imageTag: string;
+  registry: string;
+  runtimeVersion?: string;
+  goBuilder?: string;
+  port?: number;
+  doPush: boolean;
+  noCache: boolean;
+  dryRun: boolean;
+  arch: string;
+}
+
+function sidecarImageName(config: SidecarBuildConfig): string {
+  const tag = `${config.imageName}:${config.imageTag}`;
+  return config.registry ? `${config.registry}/${tag}` : tag;
+}
+
+function sidecarOptionsToConfig(
+  runtime: SidecarRuntime,
+  options: Record<string, unknown>
+): SidecarBuildConfig {
+  return {
+    runtime,
+    imageName: (options.name as string) || `heretic-builder-${runtime}`,
+    imageTag: (options.tag as string) || "latest",
+    registry: (options.registry as string) || "",
+    runtimeVersion: options.runtimeVersion as string | undefined,
+    goBuilder: options.goBuilder as string | undefined,
+    port: options.port ? Number(options.port) : undefined,
+    doPush: !!options.push,
+    noCache: options.cache === false,
+    dryRun: !!options.dryRun,
+    arch: (options.arch as string) || "",
+  };
+}
+
+/**
+ * Lay out a build context for a builder image:
+ *   <dir>/Dockerfile
+ *   <dir>/exec-server/{main.go,go.mod}
+ * The Dockerfile's build stage compiles the vendored exec-server from there.
+ */
+async function prepareSidecarBuildDir(config: SidecarBuildConfig): Promise<string> {
+  const buildDir = await mkdtemp(join(tmpdir(), "heretic-builder-"));
+
+  const dockerfile = generateSidecarDockerfile({
+    runtime: config.runtime,
+    runtimeVersion: config.runtimeVersion,
+    goBuilderImage: config.goBuilder,
+    port: config.port,
+  });
+  await writeFile(join(buildDir, "Dockerfile"), dockerfile);
+
+  const srcDir = join(buildDir, "exec-server");
+  await mkdir(srcDir, { recursive: true });
+  await writeFile(join(srcDir, "main.go"), EXEC_SERVER_MAIN_GO);
+  await writeFile(join(srcDir, "go.mod"), EXEC_SERVER_GO_MOD);
+
+  return buildDir;
+}
+
+function printSidecarConfig(config: SidecarBuildConfig): void {
+  const version = config.runtimeVersion || defaultSidecarRuntimeVersion(config.runtime);
+  logRaw(`\n=== Building ${config.runtime} build-sidecar ===\n`);
+  logRaw("Configuration:");
+  logRaw(`  Runtime:        ${config.runtime} (${sidecarRuntimeTools(config.runtime)})`);
+  logRaw(`  Image name:     ${sidecarImageName(config)}`);
+  logRaw(`  Runtime ver.:   ${version}`);
+  logRaw(`  Architecture:   ${config.arch || "current platform"}`);
+  logRaw(`  Push:           ${config.doPush}`);
+  logRaw("  Server:         Go exec-server (/health, /info, /exec, /exec/stream)");
+  logRaw("");
+}
+
+async function runImageBuildSidecar(
+  runtimeArg: string,
+  options: Record<string, unknown>
+): Promise<void> {
+  const logger = getLogger();
+
+  if (!isSidecarRuntime(runtimeArg)) {
+    logger.error(
+      `Invalid sidecar runtime '${runtimeArg}'. Use one of: ${SIDECAR_RUNTIMES.join(", ")}`
+    );
+    process.exit(1);
+  }
+
+  const config = sidecarOptionsToConfig(runtimeArg, options);
+
+  if (!config.dryRun) {
+    const dockerOk = await isDockerAvailable();
+    if (!dockerOk) {
+      logger.error(
+        "Docker is not available. Install Docker or use --dry-run to preview the Dockerfile."
+      );
+      process.exit(1);
+    }
+  }
+
+  logRaw("=== Heretic Build-Sidecar Image Builder ===\n");
+  printSidecarConfig(config);
+
+  const buildDir = await prepareSidecarBuildDir(config);
+
+  try {
+    if (config.dryRun) {
+      logRaw("=== Generated Dockerfile ===");
+      logRaw(
+        generateSidecarDockerfile({
+          runtime: config.runtime,
+          runtimeVersion: config.runtimeVersion,
+          goBuilderImage: config.goBuilder,
+          port: config.port,
+        })
+      );
+      return;
+    }
+
+    const imageName = sidecarImageName(config);
+    const platforms = getPlatforms(config.arch);
+
+    const buildArgs: string[] = [];
+    if (config.runtimeVersion) {
+      buildArgs.push("--build-arg", `RUNTIME_VERSION=${config.runtimeVersion}`);
+    }
+    if (config.goBuilder) {
+      buildArgs.push("--build-arg", `GO_BUILDER_IMAGE=${config.goBuilder}`);
+    }
+    buildArgs.push("--tag", imageName);
+    if (config.noCache) {
+      buildArgs.push("--no-cache");
+    }
+
+    if (platforms) {
+      buildArgs.push("--platform", platforms);
+      if (config.doPush) {
+        logRaw("Mode: buildx with push");
+        await runCommand(
+          "docker",
+          ["buildx", "build", ...buildArgs, "--push", "-f", "Dockerfile", "."],
+          buildDir
+        );
+      } else {
+        logRaw("Mode: buildx local");
+        await runCommand(
+          "docker",
+          ["buildx", "build", ...buildArgs, "--load", "-f", "Dockerfile", "."],
+          buildDir
+        );
+      }
+    } else {
+      logRaw("Mode: standard build (current platform)");
+      await runCommand("docker", ["build", ...buildArgs, "-f", "Dockerfile", "."], buildDir);
+      if (config.doPush && config.registry) {
+        logRaw("Pushing image...");
+        await runCommand("docker", ["push", imageName]);
+      }
+    }
+
+    logRaw(`\nBuild complete: ${imageName}\n`);
+    logRaw("Use it in a profile:");
+    logRaw("  tool_backends:");
+    logRaw("    sidecars:");
+    logRaw(`      - runtime: ${config.runtime}`);
+    logRaw(`        image: ${imageName}`);
+    logRaw("");
+  } finally {
+    await rm(buildDir, { recursive: true, force: true });
   }
 }
 
@@ -457,6 +675,26 @@ export function createImageCommand(): Command {
     });
   image.addCommand(buildCmd);
 
+  // --- build-sidecar subcommand ---
+  const buildSidecarCmd = new Command("build-sidecar");
+  buildSidecarCmd
+    .description("Build a build-sidecar image (Go exec-server + runtime toolchain)")
+    .argument("<runtime>", `Runtime: ${SIDECAR_RUNTIMES.join(", ")}`)
+    .option("-n, --name <name>", "Image name (default: heretic-builder-<runtime>)")
+    .option("-t, --tag <tag>", "Image tag (default: latest)")
+    .option("-r, --registry <reg>", "Registry prefix (e.g., ghcr.io/username)")
+    .option("--runtime-version <ver>", "Runtime toolchain version (e.g. node 22, python 3.13)")
+    .option("--go-builder <image>", "Golang image for the exec-server build stage")
+    .option("--port <port>", "exec-server port baked into the image (default: 8080)")
+    .option("-p, --push", "Push image after build")
+    .option("--no-cache", "Build without Docker cache")
+    .option("--dry-run", "Print Dockerfile and exit without building")
+    .option("-a, --arch <arch>", "Architecture: amd64, arm64, or both (default: current)")
+    .action(async (runtime, options) => {
+      await runImageBuildSidecar(runtime, options);
+    });
+  image.addCommand(buildSidecarCmd);
+
   // --- generate subcommand ---
   const generateCmd = new Command("generate");
   generateCmd.description(
@@ -466,8 +704,15 @@ export function createImageCommand(): Command {
   generateCmd
     .option(
       "--format <format>",
-      "Template to output: dockerfile, entrypoint, ssh-exec, sidecar-exec (default: dockerfile)"
+      "Template to output: dockerfile, entrypoint, ssh-exec, sidecar-exec, sidecar-dockerfile, exec-server (default: dockerfile)"
     )
+    .option(
+      "--runtime <runtime>",
+      `Sidecar runtime for sidecar-dockerfile (${SIDECAR_RUNTIMES.join(", ")})`
+    )
+    .option("--runtime-version <ver>", "Runtime version for sidecar-dockerfile")
+    .option("--go-builder <image>", "Golang build-stage image for sidecar-dockerfile")
+    .option("--port <port>", "exec-server port for sidecar-dockerfile")
     .action(async (options) => {
       await runImageGenerate(options);
     });

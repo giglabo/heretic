@@ -11,6 +11,7 @@ import {
   cleanupMcpFile,
   loadMcpFromFile,
   parseMcpJson,
+  hasUsableMcpConfig,
 } from "../src/runners/mcp-helper";
 import type { McpServer } from "../src/types/agent-profile";
 
@@ -121,6 +122,62 @@ describe("MCP Helper", () => {
       const filepath = writeMcpFile(testDir, servers);
 
       expect(filepath).toBe(join(testDir, ".heretic", "cli", "temp", ".mcp.json"));
+    });
+  });
+
+  describe("hasUsableMcpConfig", () => {
+    test("should return false for a missing file", () => {
+      expect(hasUsableMcpConfig(join(testDir, "nope.json"))).toBe(false);
+    });
+
+    test("should return false for a 0-byte file", () => {
+      const filepath = join(testDir, ".mcp.json");
+      writeFileSync(filepath, "", "utf-8");
+      expect(hasUsableMcpConfig(filepath)).toBe(false);
+    });
+
+    test("should return false for a whitespace-only file", () => {
+      const filepath = join(testDir, ".mcp.json");
+      writeFileSync(filepath, "  \n\t ", "utf-8");
+      expect(hasUsableMcpConfig(filepath)).toBe(false);
+    });
+
+    test("should return false for invalid JSON", () => {
+      const filepath = join(testDir, ".mcp.json");
+      writeFileSync(filepath, "{ not json", "utf-8");
+      expect(hasUsableMcpConfig(filepath)).toBe(false);
+    });
+
+    test("should return false when mcpServers is absent or empty", () => {
+      const missing = join(testDir, "missing-key.json");
+      writeFileSync(missing, JSON.stringify({ other: true }), "utf-8");
+      expect(hasUsableMcpConfig(missing)).toBe(false);
+
+      const empty = join(testDir, "empty-servers.json");
+      writeFileSync(empty, JSON.stringify({ mcpServers: {} }), "utf-8");
+      expect(hasUsableMcpConfig(empty)).toBe(false);
+    });
+
+    test("should return true when at least one server is declared", () => {
+      const filepath = join(testDir, ".mcp.json");
+      writeFileSync(
+        filepath,
+        JSON.stringify({ mcpServers: { context7: { command: "npx" } } }),
+        "utf-8"
+      );
+      expect(hasUsableMcpConfig(filepath)).toBe(true);
+    });
+
+    test("should return true for an http-transport server", () => {
+      const filepath = join(testDir, ".mcp.json");
+      writeFileSync(
+        filepath,
+        JSON.stringify({
+          mcpServers: { watchword: { type: "http", url: "https://example.com/mcp" } },
+        }),
+        "utf-8"
+      );
+      expect(hasUsableMcpConfig(filepath)).toBe(true);
     });
   });
 

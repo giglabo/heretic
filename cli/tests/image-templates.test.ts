@@ -3,13 +3,19 @@ import {
   generateDockerfile,
   agentNpmPackages,
   generateEntrypoint,
-  SIDECAR_EXEC_STUB,
+  SIDECAR_EXEC_SCRIPT,
   SSH_EXEC_SCRIPT,
   defaultImageBuildConfig,
   VALID_IMAGE_AGENTS,
   DEFAULT_BASE_IMAGE,
+  generateSidecarDockerfile,
+  defaultSidecarRuntimeVersion,
+  isSidecarRuntime,
+  EXEC_SERVER_MAIN_GO,
+  EXEC_SERVER_GO_MOD,
   type ImageAgentType,
 } from "../src/templates";
+import { SIDECAR_RUNTIMES } from "../src/types/agent-profile";
 
 describe("agentNpmPackages", () => {
   it("returns claude packages", () => {
@@ -40,6 +46,27 @@ describe("generateDockerfile", () => {
     expect(df).toContain("COPY sidecar-exec");
     expect(df).toContain("COPY ssh-exec");
     expect(df).toContain('CMD ["/bin/bash"]');
+  });
+
+  it("bakes the entrypoint so tool backends resolve at start-up (gap A-1)", () => {
+    const config = defaultImageBuildConfig();
+    const df = generateDockerfile(config, "claude", false);
+    // Without a baked ENTRYPOINT, setup_tool_wrappers never runs and the
+    // sidecar/SSH backends are inert.
+    expect(df).toContain("COPY entrypoint.sh /entrypoint.sh");
+    expect(df).toContain('ENTRYPOINT ["/entrypoint.sh"]');
+    // CMD must remain so `exec "$@"` still drops to an interactive shell.
+    expect(df).toContain('CMD ["/bin/bash"]');
+    // ENTRYPOINT must be declared before dropping to the agent user.
+    expect(df.indexOf('ENTRYPOINT ["/entrypoint.sh"]')).toBeLessThan(
+      df.indexOf("USER ${AGENT_USER}")
+    );
+  });
+
+  it("makes the wrapper dir writable by the agent user (gap A-3)", () => {
+    const config = defaultImageBuildConfig();
+    const df = generateDockerfile(config, "claude", false);
+    expect(df).toContain("chown ${AGENT_UID}:${AGENT_GID} /opt/sidecar/wrappers");
   });
 
   it("generates Dockerfile for each agent type", () => {
@@ -183,6 +210,12 @@ describe("generateEntrypoint", () => {
     expect(ep).toContain("ssh-exec");
   });
 
+  it("probes wrapper-dir writability before writing (gap A-3)", () => {
+    const ep = generateEntrypoint();
+    expect(ep).toContain(".probe");
+    expect(ep).toContain("is not writable");
+  });
+
   it("handles all agent types in workflow mode", () => {
     const ep = generateEntrypoint();
     expect(ep).toContain("claude)");
@@ -193,10 +226,17 @@ describe("generateEntrypoint", () => {
 });
 
 describe("resource scripts", () => {
-  it("SIDECAR_EXEC_STUB is a valid bash script", () => {
-    expect(SIDECAR_EXEC_STUB).toStartWith("#!/bin/bash");
-    expect(SIDECAR_EXEC_STUB).toContain("sidecar-exec");
-    expect(SIDECAR_EXEC_STUB).toContain("exit 1");
+  it("SIDECAR_EXEC_SCRIPT is a real client that routes to the exec API", () => {
+    expect(SIDECAR_EXEC_SCRIPT).toStartWith("#!/bin/bash");
+    // It must actually reach the sidecar, not be the old always-failing stub.
+    expect(SIDECAR_EXEC_SCRIPT).toContain("BUILD_SIDECARS");
+    expect(SIDECAR_EXEC_SCRIPT).toContain("internal_url");
+    expect(SIDECAR_EXEC_SCRIPT).toContain("/exec");
+    expect(SIDECAR_EXEC_SCRIPT).toContain("/exec/stream");
+    // Streaming reads via process substitution so the exit code survives (gap C-3).
+    expect(SIDECAR_EXEC_SCRIPT).toContain("done < <(curl");
+    // Timeout maps to 124, not an ambiguous 255 (gap C-6).
+    expect(SIDECAR_EXEC_SCRIPT).toContain("exit 124");
   });
 
   it("SSH_EXEC_SCRIPT is a valid bash script", () => {
@@ -204,5 +244,89 @@ describe("resource scripts", () => {
     expect(SSH_EXEC_SCRIPT).toContain("SSH_HOST");
     expect(SSH_EXEC_SCRIPT).toContain("exec ssh");
     expect(SSH_EXEC_SCRIPT).toContain("set -euo pipefail");
+  });
+
+  it("sidecar-exec encodes argv without jq's --args (jq 1.6 flag-parsing bug)", () => {
+    // jq < 1.7 (Debian bookworm ships 1.6) does not stop option parsing after
+    // `--args`, so `$ARGS.positional --args "$@"` dies on any dash-flag —
+    // `npm install --save-dev`, `go build -o`, etc. The client must build the
+    // argv array incrementally with `--arg`, which consumes values positionally.
+    // The broken invocation must not appear as executable code.
+    expect(SIDECAR_EXEC_SCRIPT).not.toContain("jq -cn '$ARGS.positional' --args");
+    expect(SIDECAR_EXEC_SCRIPT).toContain('jq -c --arg x "$_arg"');
+  });
+});
+
+describe("exec-server sources (build-sidecar server)", () => {
+  it("embeds the Go exec-server implementing the wire contract", () => {
+    expect(EXEC_SERVER_MAIN_GO).toContain("package main");
+    // The four endpoints the sidecar-exec client + compose healthcheck rely on.
+    expect(EXEC_SERVER_MAIN_GO).toContain('"/health"');
+    expect(EXEC_SERVER_MAIN_GO).toContain('"/info"');
+    expect(EXEC_SERVER_MAIN_GO).toContain('"/exec"');
+    expect(EXEC_SERVER_MAIN_GO).toContain('"/exec/stream"');
+    // Hardening: process-group kill (C-12) and the port-agnostic health probe (F-1).
+    expect(EXEC_SERVER_MAIN_GO).toContain("Setpgid");
+    expect(EXEC_SERVER_MAIN_GO).toContain('flag.Bool("healthcheck"');
+  });
+
+  it("embeds a go.mod", () => {
+    expect(EXEC_SERVER_GO_MOD).toContain("module ");
+    expect(EXEC_SERVER_GO_MOD).toContain("go 1.");
+  });
+});
+
+describe("generateSidecarDockerfile", () => {
+  it("rejects unknown runtimes and validates the five known ones", () => {
+    expect(isSidecarRuntime("node")).toBe(true);
+    expect(isSidecarRuntime("elixir")).toBe(false);
+    // @ts-expect-error -- exercising the runtime guard with a bad value
+    expect(() => generateSidecarDockerfile({ runtime: "elixir" })).toThrow();
+  });
+
+  it("generates a hardened multi-stage builder for every runtime", () => {
+    for (const rt of SIDECAR_RUNTIMES) {
+      const df = generateSidecarDockerfile({ runtime: rt });
+      // Two-stage: compile the Go server, then copy onto the toolchain base.
+      expect(df).toContain("AS exec-build");
+      expect(df).toContain("COPY exec-server/ ./");
+      expect(df).toContain("COPY --from=exec-build /out/exec-server /usr/local/bin/exec-server");
+      // Non-root default (F-2) and the exec-server entrypoint.
+      expect(df).toContain("USER builder");
+      expect(df).toContain('CMD ["exec-server"]');
+      expect(df).toContain(`EXEC_SERVER_RUNTIME=${rt}`);
+      // Port-agnostic healthcheck (F-1): never hard-codes a numeric port here.
+      expect(df).toContain('CMD ["exec-server", "-healthcheck"]');
+    }
+  });
+
+  it("pins the default runtime version per runtime and honors overrides", () => {
+    const nodeDf = generateSidecarDockerfile({ runtime: "node" });
+    expect(nodeDf).toContain(`ARG RUNTIME_VERSION=${defaultSidecarRuntimeVersion("node")}`);
+    expect(nodeDf).toContain("FROM node:${RUNTIME_VERSION}-bookworm-slim");
+
+    const pinned = generateSidecarDockerfile({ runtime: "node", runtimeVersion: "20" });
+    expect(pinned).toContain("ARG RUNTIME_VERSION=20");
+  });
+
+  it("bakes and exposes a custom port", () => {
+    const df = generateSidecarDockerfile({ runtime: "go", port: 9000 });
+    expect(df).toContain("EXEC_SERVER_PORT=9000");
+    expect(df).toContain("EXPOSE 9000");
+  });
+
+  it("allows overriding the Go build-stage image", () => {
+    const df = generateSidecarDockerfile({
+      runtime: "rust",
+      goBuilderImage: "golang:1.22-bookworm",
+    });
+    expect(df).toContain("ARG GO_BUILDER_IMAGE=golang:1.22-bookworm");
+  });
+
+  it("installs each runtime's expected toolchain", () => {
+    expect(generateSidecarDockerfile({ runtime: "node" })).toContain("corepack enable");
+    expect(generateSidecarDockerfile({ runtime: "python" })).toContain("poetry pytest ruff");
+    expect(generateSidecarDockerfile({ runtime: "java" })).toContain("maven gradle");
+    expect(generateSidecarDockerfile({ runtime: "rust" })).toContain("rustup component add");
   });
 });

@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import inquirer from "inquirer";
+import { parsePortSpec } from "../utils/ports";
 import { getLogger, logRaw } from "../logger";
 import {
   loadAllProfiles,
@@ -82,6 +83,20 @@ function formatTable(data: AgentListItem[]): string {
 /**
  * List all available agent profiles
  */
+
+/** Inquirer validator for a port spec (docker run -p syntax). */
+function validatePortInput(input: string): string | boolean {
+  if (!input || !input.trim()) {
+    return "Port mapping is required";
+  }
+  try {
+    parsePortSpec(input);
+    return true;
+  } catch (error) {
+    return (error as Error).message;
+  }
+}
+
 export async function listAgents(options: ListAgentsOptions): Promise<void> {
   const logger = getLogger();
   const cwd = process.cwd();
@@ -360,16 +375,8 @@ export async function addAgent(name: string, options: AddAgentOptions): Promise<
         {
           type: "input",
           name: "port",
-          message: "  Port mapping (format: host:container, e.g., 8080:80):",
-          validate: (input: string): string | boolean => {
-            if (!input || !input.trim()) {
-              return "Port mapping is required";
-            }
-            if (!/^\d+:\d+$/.test(input)) {
-              return "Port mapping must be in format host:container (e.g., 8080:80)";
-            }
-            return true;
-          },
+          message: "  Port mapping (e.g. 8080:80, 3000-3020, 127.0.0.1:5432:5432):",
+          validate: validatePortInput,
         },
       ]);
 
@@ -819,16 +826,8 @@ async function editProfileInteractive(
         {
           type: "input",
           name: "port",
-          message: "  Port mapping (format: host:container, e.g., 8080:80):",
-          validate: (input: string): string | boolean => {
-            if (!input || !input.trim()) {
-              return "Port mapping is required";
-            }
-            if (!/^\d+:\d+$/.test(input)) {
-              return "Port mapping must be in format host:container (e.g., 8080:80)";
-            }
-            return true;
-          },
+          message: "  Port mapping (e.g. 8080:80, 3000-3020, 127.0.0.1:5432:5432):",
+          validate: validatePortInput,
         },
       ]);
 

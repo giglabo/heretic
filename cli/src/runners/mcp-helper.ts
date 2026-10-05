@@ -8,7 +8,7 @@
 import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
-import type { McpServer, AgentType } from "../types/agent-profile";
+import type { McpServer, McpTransportType, AgentType } from "../types/agent-profile";
 import { getLogger } from "../logger";
 
 const logger = getLogger();
@@ -56,6 +56,49 @@ export function getExistingMcpPath(agentType: AgentType, projectDir: string): st
 }
 
 /**
+ * Check whether an existing MCP config file holds usable server definitions.
+ *
+ * A file that is missing, empty, whitespace-only, unparseable, or that declares
+ * no servers is treated as absent. Without this check a stray 0-byte `.mcp.json`
+ * in the project root silently suppresses the profile's MCP mount, leaving the
+ * agent with no MCP servers at all.
+ *
+ * @param filePath - Absolute path to the existing MCP config file to check
+ * @returns True when the file declares at least one MCP server
+ */
+export function hasUsableMcpConfig(filePath: string): boolean {
+  if (!existsSync(filePath)) {
+    return false;
+  }
+
+  let parsed: unknown;
+  try {
+    const raw = readFileSync(filePath, "utf-8").trim();
+    if (raw === "") {
+      return false;
+    }
+    parsed = JSON.parse(raw);
+  } catch {
+    logger.debug(
+      { filePath },
+      "Existing MCP config is unreadable or invalid JSON - treating as absent"
+    );
+    return false;
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return false;
+  }
+
+  const servers = (parsed as Record<string, unknown>).mcpServers;
+  if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
+    return false;
+  }
+
+  return Object.keys(servers).length > 0;
+}
+
+/**
  * Write MCP server configuration to a temp .mcp.json file.
  *
  * When sessionDir is provided, writes to `<sessionDir>/.mcp.json`.
@@ -89,18 +132,29 @@ export function writeMcpFile(
 
   const servers = mcpConfig.mcpServers as Record<string, unknown>;
   for (const server of mcpServers) {
-    const entry: Record<string, unknown> = {
-      command: server.command,
-    };
-    if (server.args && server.args.length > 0) {
-      entry.args = server.args;
+    const entry: Record<string, unknown> = {};
+
+    if (server.type === "http") {
+      // HTTP transport: type + url + optional headers
+      entry.type = "http";
+      entry.url = server.url;
+      if (server.headers && Object.keys(server.headers).length > 0) {
+        entry.headers = server.headers;
+      }
+    } else {
+      // stdio transport (default): command + optional args
+      entry.command = server.command;
+      if (server.args && server.args.length > 0) {
+        entry.args = server.args;
+      }
     }
+
     if (server.env && Object.keys(server.env).length > 0) {
       entry.env = server.env;
     }
     // Copilot CLI requires type and tools fields on every server entry
     if (agentType === "copilot-cli") {
-      entry.type = "stdio";
+      if (!entry.type) entry.type = "stdio";
       entry.tools = ["*"];
     }
     servers[server.name] = entry;
@@ -222,17 +276,41 @@ function convertServersMap(serversMap: Record<string, unknown>, filePath: string
 
     const serverEntry = entry as Record<string, unknown>;
 
-    if (!serverEntry.command || typeof serverEntry.command !== "string") {
-      throw new Error(`MCP server '${name}' in ${filePath} is missing required field 'command'`);
-    }
+    // Detect transport type: explicit "type" field or infer from presence of "url"
+    const explicitType = serverEntry.type as string | undefined;
+    const isHttp =
+      explicitType === "http" ||
+      (!explicitType && serverEntry.url && typeof serverEntry.url === "string");
 
-    const server: McpServer = {
-      name,
-      command: serverEntry.command,
-    };
+    const server: McpServer = { name };
 
-    if (Array.isArray(serverEntry.args)) {
-      server.args = serverEntry.args as string[];
+    if (isHttp) {
+      // HTTP transport — requires url
+      if (!serverEntry.url || typeof serverEntry.url !== "string") {
+        throw new Error(
+          `MCP server '${name}' in ${filePath} is missing required field 'url' for http transport`
+        );
+      }
+      server.type = "http" as McpTransportType;
+      server.url = serverEntry.url;
+
+      if (
+        serverEntry.headers &&
+        typeof serverEntry.headers === "object" &&
+        !Array.isArray(serverEntry.headers)
+      ) {
+        server.headers = serverEntry.headers as Record<string, string>;
+      }
+    } else {
+      // stdio transport (default) — requires command
+      if (!serverEntry.command || typeof serverEntry.command !== "string") {
+        throw new Error(`MCP server '${name}' in ${filePath} is missing required field 'command'`);
+      }
+      server.command = serverEntry.command;
+
+      if (Array.isArray(serverEntry.args)) {
+        server.args = serverEntry.args as string[];
+      }
     }
 
     if (serverEntry.env && typeof serverEntry.env === "object" && !Array.isArray(serverEntry.env)) {

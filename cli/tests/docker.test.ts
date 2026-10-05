@@ -3,12 +3,17 @@ import {
   createDockerClient,
   getDockerClient,
   getDockerSocketPath,
+  getDockerSocketMountSource,
   isDockerAvailable,
   getDockerVersion,
   getDockerInfo,
   listImages,
   listContainers,
+  findContainerByName,
+  isContainerActive,
 } from "../src/utils/docker";
+import type Docker from "dockerode";
+import type { ContainerInfo } from "dockerode";
 
 describe("Docker Utils", () => {
   let dockerAvailable: boolean;
@@ -40,6 +45,26 @@ describe("Docker Utils", () => {
     });
   });
 
+  describe("getDockerSocketMountSource", () => {
+    it("uses the VM daemon's socket on macOS and Windows, not the client's", () => {
+      expect(getDockerSocketMountSource("darwin", undefined)).toBe("/var/run/docker.sock");
+      expect(getDockerSocketMountSource("darwin", "unix:///Users/me/.docker/run/docker.sock")).toBe(
+        "/var/run/docker.sock"
+      );
+      expect(getDockerSocketMountSource("win32", undefined)).toBe("/var/run/docker.sock");
+    });
+
+    it("honours a unix DOCKER_HOST on Linux (rootless)", () => {
+      expect(getDockerSocketMountSource("linux", "unix:///run/user/1000/docker.sock")).toBe(
+        "/run/user/1000/docker.sock"
+      );
+      expect(getDockerSocketMountSource("linux", "tcp://10.0.0.1:2375")).toBe(
+        "/var/run/docker.sock"
+      );
+      expect(getDockerSocketMountSource("linux", undefined)).toBe("/var/run/docker.sock");
+    });
+  });
+
   describe("getDockerSocketPath", () => {
     it("should return a string path", () => {
       const path = getDockerSocketPath();
@@ -53,6 +78,46 @@ describe("Docker Utils", () => {
         expect(path).toContain("pipe");
       } else {
         expect(path).toContain("docker.sock");
+      }
+    });
+  });
+
+  describe("findContainerByName", () => {
+    const containers = [
+      { Id: "aaa", Names: ["/heretic-a-default-12345678"], State: "running" },
+      { Id: "bbb", Names: ["/heretic-a-default-12345678-extra"], State: "exited" },
+    ] as unknown as ContainerInfo[];
+    let listOptions: unknown;
+    const docker = {
+      listContainers: async (opts: unknown) => {
+        listOptions = opts;
+        return containers;
+      },
+    } as unknown as Docker;
+
+    it("should match the exact name, including stopped containers", async () => {
+      const found = await findContainerByName("heretic-a-default-12345678", docker);
+      expect(found?.Id).toBe("aaa");
+      expect(listOptions).toEqual({ all: true });
+    });
+
+    it("should return undefined for a prefix-only match", async () => {
+      expect(await findContainerByName("heretic-a-default", docker)).toBeUndefined();
+    });
+  });
+
+  describe("isContainerActive", () => {
+    const withState = (State: string): ContainerInfo => ({ State }) as unknown as ContainerInfo;
+
+    it("should treat running, paused and restarting as active", () => {
+      for (const state of ["running", "paused", "restarting"]) {
+        expect(isContainerActive(withState(state))).toBe(true);
+      }
+    });
+
+    it("should treat created, exited and dead as inactive", () => {
+      for (const state of ["created", "exited", "dead"]) {
+        expect(isContainerActive(withState(state))).toBe(false);
       }
     });
   });

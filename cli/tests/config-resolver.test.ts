@@ -371,6 +371,36 @@ describe("Config Resolver", () => {
       expect(result.extra.labels).toEqual({ team: "platform" }); // preserved
     });
 
+    it("should resolve tool_backends and let a CLI override replace the sidecars", () => {
+      const globalProfile: AgentProfile = {
+        image: "test-image:latest",
+        runner: "compose",
+        volumes: [{ source: "${CWD}", target: "/workspace" }],
+        tool_backends: {
+          run_as_caller_uid: true,
+          sidecars: [{ runtime: "python", image: "profile-python:latest" }],
+        },
+      };
+
+      mockLoadProfile.mockReturnValue(globalProfile);
+      mockHasLocalConfig.mockReturnValue(false);
+
+      const result = resolveConfig({
+        profileName: "test-profile",
+        projectDir: "/project",
+        cliOverrides: {
+          tool_backends: { sidecars: [{ runtime: "node", image: "${CWD}/node:latest" }] },
+        },
+      });
+
+      // sidecars array replaces; scalar run_as_caller_uid is preserved from base
+      expect(result.toolBackends?.run_as_caller_uid).toBe(true);
+      expect(result.toolBackends?.sidecars).toHaveLength(1);
+      expect(result.toolBackends?.sidecars?.[0].runtime).toBe("node");
+      // ${CWD} interpolation reaches nested tool_backends values
+      expect(result.toolBackends?.sidecars?.[0].image).toBe("/project/node:latest");
+    });
+
     it("should merge extra labels shallowly", () => {
       const globalProfile: AgentProfile = {
         image: "test-image:latest",
@@ -745,6 +775,72 @@ describe("Config Resolver", () => {
     });
   });
 
+  describe("ports", () => {
+    const base: AgentProfile = { image: "img", extra: { ports: ["8080:80"] } };
+
+    it("expands presets, applies offset and host IP from a local override", () => {
+      mockLoadProfile.mockReturnValue(base);
+      mockHasLocalConfig.mockReturnValue(true);
+      mockLoadLocalConfig.mockReturnValue({
+        extends: "p",
+        extra: { port_presets: ["mail"], ports_offset: 10000, ports_host_ip: "0.0.0.0" },
+      } as LocalOverride);
+
+      const result = resolveConfig({ profileName: "p", projectDir: "/project" });
+
+      expect(result.extra.ports).toEqual([
+        "0.0.0.0:8080:80",
+        "0.0.0.0:11025:1025",
+        "0.0.0.0:18025:8025",
+      ]);
+      expect(result.portMappings?.find((m) => m.containerPort === 1025)?.optional).toBe(true);
+      expect(result.portMappings?.find((m) => m.containerPort === 80)?.optional).toBe(false);
+    });
+
+    it("CLI --port / --port-preset add to the profile instead of replacing it", () => {
+      mockLoadProfile.mockReturnValue(base);
+
+      const result = resolveConfig({
+        profileName: "p",
+        projectDir: "/project",
+        addPorts: ["13000-13001:3000-3001"],
+        addPortPresets: ["mail"],
+      });
+
+      expect(result.extra.ports).toEqual([
+        "8080:80",
+        "1025:1025",
+        "13000-13001:3000-3001",
+        "8025:8025",
+      ]);
+    });
+
+    it("--no-ports override clears profile ports", () => {
+      mockLoadProfile.mockReturnValue({ ...base, extra: { ...base.extra, port_presets: ["dev"] } });
+
+      const result = resolveConfig({
+        profileName: "p",
+        projectDir: "/project",
+        cliOverrides: { extra: { ports: [], port_presets: [] } },
+      });
+
+      expect(result.portMappings).toBeUndefined();
+      expect(result.extra.ports).toEqual([]);
+    });
+
+    it("fails on an invalid spec or unknown preset", () => {
+      mockLoadProfile.mockReturnValue({ image: "img", extra: { ports: ["3000-2000"] } });
+      expect(() => resolveConfig({ profileName: "p", projectDir: "/project" })).toThrow(
+        /below its start/
+      );
+
+      mockLoadProfile.mockReturnValue({ image: "img", extra: { port_presets: ["nope"] } });
+      expect(() => resolveConfig({ profileName: "p", projectDir: "/project" })).toThrow(
+        /Unknown port preset/
+      );
+    });
+  });
+
   describe("validateResolvedConfig", () => {
     const validConfig: ResolvedAgentConfig = {
       name: "test",
@@ -912,6 +1008,87 @@ describe("Config Resolver", () => {
       };
       const errors = validateResolvedConfig(config);
       expect(errors.length).toBeGreaterThan(1);
+    });
+
+    it("should reject an invalid sidecar runtime (gap B-3)", () => {
+      const config: ResolvedAgentConfig = {
+        ...validConfig,
+        volumes: [{ source: "/host", target: "/workspace" }],
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        toolBackends: { sidecars: [{ runtime: "deno" as any, image: "x:latest" }] },
+      };
+      const errors = validateResolvedConfig(config);
+      expect(errors.some((e) => e.includes("runtime 'deno' is invalid"))).toBe(true);
+    });
+
+    it("should reject a sidecar with an empty image", () => {
+      const config: ResolvedAgentConfig = {
+        ...validConfig,
+        volumes: [{ source: "/host", target: "/workspace" }],
+        toolBackends: { sidecars: [{ runtime: "node", image: "" }] },
+      };
+      const errors = validateResolvedConfig(config);
+      expect(errors.some((e) => e.includes("sidecars[0].image must be non-empty"))).toBe(true);
+    });
+
+    it("should reject duplicate sidecar runtimes", () => {
+      const config: ResolvedAgentConfig = {
+        ...validConfig,
+        volumes: [{ source: "/host", target: "/workspace" }],
+        toolBackends: {
+          sidecars: [
+            { runtime: "node", image: "a:latest" },
+            { runtime: "node", image: "b:latest" },
+          ],
+        },
+      };
+      const errors = validateResolvedConfig(config);
+      expect(errors.some((e) => e.includes("duplicate runtime 'node'"))).toBe(true);
+    });
+
+    it("should require a volume for the workspace when sidecars are configured", () => {
+      const config: ResolvedAgentConfig = {
+        ...validConfig,
+        volumes: [{ source: "/host", target: "/somewhere-else" }],
+        toolBackends: { sidecars: [{ runtime: "node", image: "a:latest" }] },
+      };
+      const errors = validateResolvedConfig(config);
+      expect(errors.some((e) => e.includes("no volume targets '/workspace'"))).toBe(true);
+    });
+
+    it("should honor a custom workspace_target for the volume check", () => {
+      const config: ResolvedAgentConfig = {
+        ...validConfig,
+        volumes: [{ source: "/host", target: "/code" }],
+        toolBackends: {
+          workspace_target: "/code",
+          sidecars: [{ runtime: "python", image: "a:latest" }],
+        },
+      };
+      const errors = validateResolvedConfig(config);
+      expect(errors).toEqual([]);
+    });
+
+    it("should reject a sidecar port out of range", () => {
+      const config: ResolvedAgentConfig = {
+        ...validConfig,
+        volumes: [{ source: "/host", target: "/workspace" }],
+        toolBackends: { sidecars: [{ runtime: "go", image: "a:latest", port: 70000 }] },
+      };
+      const errors = validateResolvedConfig(config);
+      expect(errors.some((e) => e.includes("port must be between"))).toBe(true);
+    });
+
+    it("should pass validation for a valid sidecar config", () => {
+      const config: ResolvedAgentConfig = {
+        ...validConfig,
+        volumes: [{ source: "/host", target: "/workspace" }],
+        toolBackends: {
+          sidecars: [{ runtime: "node", image: "heretic-builder-node:latest" }],
+        },
+      };
+      const errors = validateResolvedConfig(config);
+      expect(errors).toEqual([]);
     });
   });
 });

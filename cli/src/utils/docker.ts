@@ -25,6 +25,26 @@ export function getDockerSocketPath(): string {
 }
 
 /**
+ * Host side of the docker.sock bind for `dind: true`.
+ *
+ * Bind sources are resolved by the daemon, not by this client. On macOS and
+ * Windows the daemon runs in a VM (Docker Desktop, Colima, OrbStack) where the
+ * client's socket (`~/.docker/run/docker.sock`, the named pipe) does not exist;
+ * the daemon's own socket there is `/var/run/docker.sock`, which is also the
+ * path Docker Desktop documents for socket mounts. On Linux the daemon is
+ * local, so a rootless `DOCKER_HOST=unix://…` socket is used when set.
+ */
+export function getDockerSocketMountSource(
+  platform: NodeJS.Platform = process.platform,
+  dockerHost: string | undefined = process.env.DOCKER_HOST
+): string {
+  if (platform === "linux" && dockerHost?.startsWith("unix://")) {
+    return dockerHost.slice("unix://".length);
+  }
+  return "/var/run/docker.sock";
+}
+
+/**
  * Create and configure Docker client
  */
 export function createDockerClient(options?: Docker.DockerOptions): Docker {
@@ -179,6 +199,25 @@ export async function runContainer(
 
   await container.start();
   return container;
+}
+
+/**
+ * Find a container (running or not) by its exact name, without the leading "/".
+ */
+export async function findContainerByName(
+  name: string,
+  docker?: Docker
+): Promise<ContainerInfo | undefined> {
+  const containers = await listContainers(docker, { all: true });
+  return containers.find((c) => c.Names.some((n) => n === `/${name}`));
+}
+
+/**
+ * Whether a container is still live (running, paused or restarting) rather
+ * than created-but-not-started, exited or dead.
+ */
+export function isContainerActive(container: ContainerInfo): boolean {
+  return ["running", "paused", "restarting"].includes(container.State);
 }
 
 /**

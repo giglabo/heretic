@@ -7,4 +7,15 @@ export {
 } from "./types";
 export { generateDockerfile, agentNpmPackages } from "./dockerfile";
 export { generateEntrypoint } from "./entrypoint";
-export { SIDECAR_EXEC_STUB, SSH_EXEC_SCRIPT } from "./resources";
+export { SIDECAR_EXEC_SCRIPT, SSH_EXEC_SCRIPT } from "./resources";
+export {
+  type SidecarImageConfig,
+  EXEC_SERVER_MAIN_GO,
+  EXEC_SERVER_GO_MOD,
+  DEFAULT_GO_BUILDER_IMAGE,
+  DEFAULT_SIDECAR_PORT,
+  generateSidecarDockerfile,
+  defaultSidecarRuntimeVersion,
+  sidecarRuntimeTools,
+  isSidecarRuntime,
+} from "./sidecar-images";
