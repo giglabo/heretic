@@ -4,7 +4,7 @@
  * preset selection. No I/O here — the command module does the side effects.
  */
 
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, readdirSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import type { SshPreset } from "../types/agent-profile";
 import { SSH_PRESET_NAMES, SSH_PRESETS } from "./ssh-presets";
@@ -135,4 +135,84 @@ export function macProtectedFolder(dir: string, home: string): string | undefine
     if (dir === protectedDir || dir.startsWith(protectedDir + "/")) return protectedDir;
   }
   return undefined;
+}
+
+/** Comment `ssh setup` puts on a profile's authorized_keys line. */
+export function authorizedKeyComment(profileName: string): string {
+  return `heretic-${profileName}`;
+}
+
+/** Key body (base64 part) of a public key line, if any. */
+export function publicKeyBody(publicKey: string): string | undefined {
+  const parts = publicKey.trim().split(/\s+/);
+  const typeIdx = parts.findIndex((p) => /^(ssh-|ecdsa-|sk-)/.test(p));
+  return typeIdx >= 0 ? parts[typeIdx + 1] : undefined;
+}
+
+/**
+ * Remove a profile's authorized_keys line(s) — matched by the
+ * `heretic-<profile>` comment — unless the key is still used by another
+ * profile (`keepBodies`). Returns the new content and how many lines went.
+ */
+export function removeAuthorizedKeyLines(
+  content: string,
+  profileName: string,
+  keepBodies: ReadonlySet<string> = new Set()
+): { content: string; removed: number } {
+  const comment = authorizedKeyComment(profileName);
+  let removed = 0;
+  const kept = content.split("\n").filter((line) => {
+    const fields = line.trim().split(/\s+/);
+    if (fields[fields.length - 1] !== comment) return true;
+    const body = publicKeyBody(line);
+    if (body && keepBodies.has(body)) return true;
+    removed++;
+    return false;
+  });
+  return { content: kept.join("\n"), removed };
+}
+
+/** Private keys under `dir` that have a `.pub` next to them. */
+export function listKeyPairs(dir: string, names?: readonly string[]): string[] {
+  let entries: string[];
+  try {
+    entries = names ? [...names] : readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((n) => !n.endsWith(".pub") && !n.startsWith("."))
+    .map((n) => join(dir, n))
+    .filter((p) => {
+      try {
+        return statSync(p).isFile() && statSync(`${p}.pub`).isFile();
+      } catch {
+        return false;
+      }
+    });
+}
+
+/** heretic-managed key path for a profile (created by `ssh setup`). */
+export function managedKeyPath(sshDir: string, profileName: string): string {
+  return join(sshDir, `${profileName}_ed25519`);
+}
+
+/**
+ * Remove every heretic-managed line (`heretic-*` comment) that authorizes the
+ * key `body` — used once no profile uses that key any more. Lines without a
+ * heretic comment (the user's own keys) are never touched.
+ */
+export function removeHereticLinesForKey(
+  content: string,
+  body: string
+): { content: string; removed: number } {
+  let removed = 0;
+  const kept = content.split("\n").filter((line) => {
+    const fields = line.trim().split(/\s+/);
+    const comment = fields[fields.length - 1] ?? "";
+    if (!comment.startsWith("heretic-") || publicKeyBody(line) !== body) return true;
+    removed++;
+    return false;
+  });
+  return { content: kept.join("\n"), removed };
 }

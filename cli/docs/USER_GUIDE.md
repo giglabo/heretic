@@ -377,6 +377,10 @@ with the `node` preset; the preset then only routes what the image lacks
 
 #### Quick start: tools on your own machine (Linux / macOS)
 
+`heretic-cli init` asks after creating each agent whether it may run toolchains on a host
+over SSH (no / this machine / a remote host) and which key to use, then runs `ssh setup` for
+it. The same can be done any time from the command line:
+
 ```bash
 heretic-cli ssh setup claude            # key, authorized_keys, host key, PATH, presets
 heretic-cli ssh check claude            # verify from the host
@@ -409,6 +413,22 @@ Linux — `sudo apt install openssh-server && sudo systemctl enable --now ssh`; 
 listen on the Docker bridge (not only `127.0.0.1`) and the firewall must allow the bridge
 subnet. Windows hosts are **not supported** (cmd/PowerShell remote shell, unmappable paths);
 use WSL or a Linux/macOS build host.
+
+#### Keys: created, reused, rotated, revoked
+
+| Action | Command | What happens |
+|--------|---------|--------------|
+| create | `ssh setup <p>` | dedicated `~/.heretic/ssh/<p>_ed25519` (no passphrase), created once and reused on every later `setup` |
+| reuse | `ssh setup <p> --key ~/.ssh/id_ed25519` | uses an existing key (also another profile's); passphrase-protected keys are rejected — a container cannot type a passphrase |
+| rotate | `ssh rotate <p>` | new dedicated key authorized, old one revoked (this machine); restart running agents |
+| revoke | `ssh revoke <p>` | removes the profile's `authorized_keys` line, its known_hosts and the keys `setup` created, and the `ssh:` block |
+| delete | `agents delete <p>` / delete in `init` | revokes as above, then deletes the profile |
+
+Each profile's `authorized_keys` line carries the comment `heretic-<profile>`; it is added
+once (re-running `setup` does not duplicate it). A line stays while another profile still
+uses the same key, and every `heretic-*` line of a key goes once no profile uses it. Keys
+you brought (`--key`, `~/.ssh/id_*`) are never deleted, and lines without a `heretic-`
+comment are never touched. For a remote host, revocation prints the line to remove there.
 
 #### Profile reference: `ssh`
 

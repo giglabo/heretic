@@ -12,19 +12,23 @@
 
 import { Command } from "commander";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import inquirer from "inquirer";
 import {
   appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import type { ResolvedAgentConfig, SshConfig, SshPreset } from "../types/agent-profile";
-import { loadProfile, saveProfile } from "../utils/profile-loader";
+import { listProfiles, loadProfile, saveProfile } from "../utils/profile-loader";
+import { promptList } from "../utils/prompt";
 import { resolveConfig } from "../utils/config-resolver";
 import {
   DOCKER_HOST_ALIAS,
@@ -39,6 +43,12 @@ import {
 } from "../utils/ssh-presets";
 import {
   PATH_CAPTURE_SCRIPT,
+  authorizedKeyComment,
+  listKeyPairs,
+  managedKeyPath,
+  publicKeyBody,
+  removeAuthorizedKeyLines,
+  removeHereticLinesForKey,
   buildAuthorizedKeysLine,
   buildKnownHostsLines,
   detectPresets,
@@ -156,6 +166,28 @@ function sshdHint(local: boolean, stderr = ""): string {
   return "install and start sshd: `sudo apt install openssh-server && sudo systemctl enable --now ssh` (Fedora: `sudo dnf install openssh-server && sudo systemctl enable --now sshd`)";
 }
 
+function expandHome(p: string): string {
+  return p === "~" || p.startsWith("~/") ? join(homedir(), p.slice(1)) : p;
+}
+
+/**
+ * Public half of a private key: the `.pub` next to it, or derived with
+ * `ssh-keygen -y`. A passphrase-protected key is rejected — the container
+ * cannot type a passphrase (BatchMode).
+ */
+function readPublicKey(keyPath: string): string {
+  const derived = spawnSync("ssh-keygen", ["-y", "-P", "", "-f", keyPath], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (derived.status !== 0) {
+    throw new Error(
+      `Cannot use ${keyPath}: ${/passphrase|incorrect/i.test(derived.stderr) ? "it is passphrase-protected (a container cannot enter a passphrase) — use a dedicated key without one" : (derived.stderr || "not a private key").trim()}`
+    );
+  }
+  return existsSync(`${keyPath}.pub`) ? readFileSync(`${keyPath}.pub`, "utf8") : derived.stdout;
+}
+
 function ensureKey(keyPath: string, comment: string): void {
   if (existsSync(keyPath)) {
     // ssh ignores a group/world-readable private key ("UNPROTECTED PRIVATE KEY FILE")
@@ -258,6 +290,8 @@ interface SetupOptions {
   commands?: string;
   from?: string;
   authorize?: boolean;
+  /** Reuse this existing private key instead of creating one */
+  key?: string;
 }
 
 function splitList(value?: string): string[] | undefined {
@@ -296,7 +330,10 @@ export async function runSshSetup(profileName: string, options: SetupOptions): P
 
   const dir = sshDir();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const keyPath = current.key_path ?? join(dir, `${profileName}_ed25519`);
+  const keyPath = options.key
+    ? resolvePath(expandHome(options.key))
+    : (current.key_path ?? managedKeyPath(dir, profileName));
+  if (options.key && !existsSync(keyPath)) throw new Error(`Key not found: ${keyPath}`);
   const knownHosts = current.known_hosts ?? join(dir, `${profileName}_known_hosts`);
   const comment = `heretic-${profileName}`;
 
@@ -314,7 +351,8 @@ export async function runSshSetup(profileName: string, options: SetupOptions): P
 
   // 1. Key
   ensureKey(keyPath, comment);
-  const pubKey = readFileSync(`${keyPath}.pub`, "utf8");
+  const pubKey = readPublicKey(keyPath);
+  if (options.key) logRaw(`  ✓ reusing key ${keyPath}`);
 
   // 2. Authorize
   if (options.authorize !== false) {
@@ -580,6 +618,218 @@ export async function runSshExec(profileName: string, command: string[]): Promis
   process.exitCode = run.status ?? 1;
 }
 
+/** Public-key bodies of every other profile's SSH key (keys still in use). */
+function keyBodiesInUse(exceptProfile: string): Set<string> {
+  const bodies = new Set<string>();
+  for (const name of listProfiles()) {
+    if (name === exceptProfile) continue;
+    try {
+      const keyPath = loadProfile(name).ssh?.key_path;
+      if (keyPath && existsSync(keyPath)) {
+        const body = publicKeyBody(readPublicKey(keyPath));
+        if (body) bodies.add(body);
+      }
+    } catch {
+      // unreadable profile / key: nothing to protect
+    }
+  }
+  return bodies;
+}
+
+/** Remove this profile's authorized_keys line(s) on this machine. */
+function unauthorizeLocally(profileName: string, keep: Set<string>): number {
+  const file = join(passwdHome(), ".ssh", "authorized_keys");
+  if (!existsSync(file)) return 0;
+  const { content, removed } = removeAuthorizedKeyLines(
+    readFileSync(file, "utf8"),
+    profileName,
+    keep
+  );
+  if (removed > 0) writeFileSync(file, content); // keeps the file's mode
+  return removed;
+}
+
+/** Drop all heretic lines for a key that no profile uses any more. */
+function sweepUnusedKey(body: string | undefined, inUse: Set<string>): number {
+  if (!body || inUse.has(body)) return 0;
+  const file = join(passwdHome(), ".ssh", "authorized_keys");
+  if (!existsSync(file)) return 0;
+  const { content, removed } = removeHereticLinesForKey(readFileSync(file, "utf8"), body);
+  if (removed > 0) writeFileSync(file, content);
+  return removed;
+}
+
+/**
+ * Revoke a profile's SSH access and delete the files `ssh setup` created for
+ * it. Keys the user brought (`--key`, ~/.ssh/id_*) are never deleted, and an
+ * authorized_keys line stays while another profile uses the same key.
+ */
+export function revokeSshAccess(profileName: string, ssh: SshConfig | undefined): string[] {
+  const done: string[] = [];
+  const dir = sshDir();
+  const managedKey = managedKeyPath(dir, profileName);
+  const inUse = keyBodiesInUse(profileName);
+
+  if (!ssh || isLocalTarget(ssh.host)) {
+    let removed = unauthorizeLocally(profileName, inUse);
+    // The profile's key may also be authorized under another (deleted or
+    // rotated-away) profile's line: drop those once nothing uses the key.
+    if (ssh?.key_path && existsSync(ssh.key_path)) {
+      try {
+        removed += sweepUnusedKey(publicKeyBody(readPublicKey(ssh.key_path)), inUse);
+      } catch {
+        // unreadable key: nothing more to match
+      }
+    }
+    if (removed > 0)
+      done.push(`removed ${removed} authorized_keys line(s) for heretic-${profileName}`);
+  } else {
+    done.push(
+      `remote host ${ssh.host}: remove the 'heretic-${profileName}' line from ~${ssh.user ?? "agent"}/.ssh/authorized_keys there`
+    );
+  }
+
+  const managedInUse =
+    existsSync(managedKey) &&
+    ((): boolean => {
+      try {
+        const body = publicKeyBody(readPublicKey(managedKey));
+        return body !== undefined && inUse.has(body);
+      } catch {
+        return false;
+      }
+    })();
+  const files = [
+    ...(managedInUse ? [] : [managedKey, `${managedKey}.pub`]),
+    join(dir, `${profileName}_known_hosts`),
+    join(dir, "run", `${profileName}.key`),
+  ];
+  for (const file of files) {
+    if (existsSync(file)) {
+      unlinkSync(file);
+      done.push(`deleted ${file}`);
+    }
+  }
+  return done;
+}
+
+function isLocalTarget(host: string | undefined): boolean {
+  return isDockerHostTarget(host) || host === "localhost" || host === "127.0.0.1";
+}
+
+/** Replace a profile's key with a fresh dedicated one and revoke the old one. */
+export async function runSshRotate(profileName: string): Promise<void> {
+  const profile = loadProfile(profileName);
+  const ssh = profile.ssh;
+  if (!ssh?.key_path) {
+    throw new Error(
+      `Profile '${profileName}' has no SSH key (run: heretic-cli ssh setup ${profileName})`
+    );
+  }
+  if (!isLocalTarget(ssh.host)) {
+    throw new Error(
+      "Rotation is automatic only for docker-host/localhost. For a remote host run `ssh setup` with a new --key, then remove the old line from authorized_keys there."
+    );
+  }
+  const oldBody = publicKeyBody(readPublicKey(ssh.key_path));
+  const dir = sshDir();
+  const managed = managedKeyPath(dir, profileName);
+  const fresh = `${managed}.new`;
+  for (const f of [fresh, `${fresh}.pub`]) if (existsSync(f)) unlinkSync(f);
+  ensureKey(fresh, authorizedKeyComment(profileName));
+  const freshPub = readFileSync(`${fresh}.pub`, "utf8");
+  authorizeLocally(freshPub, authorizedKeyComment(profileName));
+
+  // Drop the old line unless another profile shares that key
+  const keep = keyBodiesInUse(profileName);
+  const freshBody = publicKeyBody(freshPub);
+  if (freshBody) keep.add(freshBody);
+  const removed =
+    oldBody && !keep.has(oldBody)
+      ? unauthorizeLocally(profileName, keep) + sweepUnusedKey(oldBody, keep)
+      : 0;
+
+  renameSync(fresh, managed);
+  renameSync(`${fresh}.pub`, `${managed}.pub`);
+  profile.ssh = { ...ssh, key_path: managed };
+  saveProfile(profileName, profile);
+  logRaw(
+    `  ✓ new key ${managed} authorized${removed ? `; old key revoked (${removed} line(s))` : ""}`
+  );
+  if (ssh.key_path !== managed) logRaw(`  i your previous key ${ssh.key_path} was left untouched`);
+  logRaw(`  Restart running agents of '${profileName}' to pick up the new key.`);
+}
+
+/**
+ * Interactive SSH step for `heretic-cli init`: ask whether the agent may run
+ * host toolchains, pick or create the key, then run `ssh setup`.
+ */
+export async function promptSshSetup(profileName: string): Promise<void> {
+  const target = await promptList("Run builds/toolchains on a host over SSH for this agent?", [
+    { name: "No", value: "no" },
+    { name: "Yes — this machine (the Docker host)", value: "local" },
+    { name: "Yes — a remote build host", value: "remote" },
+  ]);
+  if (target === "no") return;
+  if (target === "local" && process.platform === "win32") {
+    logRaw("  SSH to the Docker host is not supported on Windows — skipped.");
+    return;
+  }
+
+  const options: SetupOptions = {};
+  if (target === "remote") {
+    const answers = await inquirer.prompt([
+      {
+        type: "input",
+        name: "host",
+        message: "SSH host:",
+        validate: (v: string): boolean | string => !!v.trim() || "required",
+      },
+      {
+        type: "input",
+        name: "user",
+        message: "SSH user:",
+        validate: (v: string): boolean | string => !!v.trim() || "required",
+      },
+      { type: "input", name: "port", message: "SSH port:", default: "22" },
+    ]);
+    options.host = answers.host.trim();
+    options.user = answers.user.trim();
+    options.port = answers.port.trim();
+  }
+
+  const candidates = [
+    ...listKeyPairs(sshDir()).filter((k) => !k.endsWith(`${profileName}_ed25519`)),
+    ...listKeyPairs(join(homedir(), ".ssh"), ["id_ed25519", "id_ecdsa", "id_rsa"]),
+  ];
+  const keyChoice = await promptList("SSH key for this agent:", [
+    { name: "Create a dedicated key (recommended)", value: "__new" },
+    ...candidates.map((k) => ({ name: `Reuse ${k}`, value: k })),
+    { name: "Another key file…", value: "__path" },
+  ]);
+  if (keyChoice === "__path") {
+    const answer = await inquirer.prompt([
+      {
+        type: "input",
+        name: "key",
+        message: "Path to the private key:",
+        validate: (v: string): boolean | string => !!v.trim() || "required",
+      },
+    ]);
+    options.key = answer.key.trim();
+  } else if (keyChoice !== "__new") {
+    options.key = keyChoice;
+  }
+
+  try {
+    await runSshSetup(profileName, options);
+    logRaw(`  Verify any time with: heretic-cli ssh check ${profileName} --container`);
+  } catch (error) {
+    logRaw(`  ✗ SSH setup failed: ${error instanceof Error ? error.message : String(error)}`);
+    logRaw(`    Retry later with: heretic-cli ssh setup ${profileName}`);
+  }
+}
+
 function runSshPresets(): void {
   logRaw("SSH command presets (routed only when missing in the container):\n");
   for (const name of SSH_PRESET_NAMES) {
@@ -591,6 +841,20 @@ function runSshPresets(): void {
   );
 }
 
+/** Run a subcommand action, printing failures as one error line + exit 1. */
+function guarded<A extends unknown[]>(
+  fn: (...args: A) => Promise<void> | void
+): (...args: A) => Promise<void> {
+  return async (...args: A): Promise<void> => {
+    try {
+      await fn(...args);
+    } catch (error) {
+      logger.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+    }
+  };
+}
+
 export function createSshCommand(): Command {
   const ssh = new Command("ssh");
   ssh.description("Set up and verify the SSH tool-execution backend (host toolchains)");
@@ -598,7 +862,7 @@ export function createSshCommand(): Command {
   ssh
     .command("presets")
     .description("List the command presets the SSH backend can route")
-    .action(() => runSshPresets());
+    .action(guarded(() => runSshPresets()));
 
   ssh
     .command("setup")
@@ -613,19 +877,64 @@ export function createSshCommand(): Command {
     )
     .option("--commands <list>", "Comma-separated extra commands to route")
     .option("--from <cidr>", "Restrict the authorized key to these source addresses")
+    .option("--key <path>", "Reuse an existing private key (default: create a dedicated one)")
     .option("--no-authorize", "Do not install the public key on the host")
-    .action(async (profile: string, options: SetupOptions) => {
-      await runSshSetup(profile, options);
-    });
+    .action(
+      guarded(async (profile: string, options: SetupOptions) => {
+        await runSshSetup(profile, options);
+      })
+    );
 
   ssh
     .command("check")
     .description("Verify key, host key, login, workspace path and host commands")
     .argument("<profile>", "Agent profile to check")
     .option("--container", "Also test from a throwaway container of the profile image")
-    .action(async (profile: string, options: CheckOptions) => {
-      await runSshCheck(profile, options);
-    });
+    .action(
+      guarded(async (profile: string, options: CheckOptions) => {
+        await runSshCheck(profile, options);
+      })
+    );
+
+  ssh
+    .command("rotate")
+    .description(
+      "Replace the profile's key with a new dedicated one and revoke the old (this machine)"
+    )
+    .argument("<profile>", "Agent profile")
+    .action(
+      guarded(async (profile: string) => {
+        await runSshRotate(profile);
+      })
+    );
+
+  ssh
+    .command("revoke")
+    .description("Remove the profile's authorized_keys line and the key files ssh setup created")
+    .argument("<profile>", "Agent profile")
+    .action(
+      guarded((profile: string) => {
+        let ssh: SshConfig | undefined;
+        try {
+          ssh = loadProfile(profile).ssh;
+        } catch {
+          // profile already gone: still clean up by name
+        }
+        const done = revokeSshAccess(profile, ssh);
+        for (const line of done) logRaw(`  ✓ ${line}`);
+        if (done.length === 0) logRaw("  nothing to revoke");
+        if (ssh) {
+          try {
+            const p = loadProfile(profile);
+            delete p.ssh;
+            saveProfile(profile, p);
+            logRaw(`  ✓ removed the ssh block from profile '${profile}'`);
+          } catch {
+            // ignore
+          }
+        }
+      })
+    );
 
   ssh
     .command("exec")
@@ -634,9 +943,11 @@ export function createSshCommand(): Command {
     )
     .argument("<profile>", "Agent profile")
     .argument("[command...]", "Command to run in the container (put it after --)")
-    .action(async (profile: string, command: string[]) => {
-      await runSshExec(profile, command);
-    });
+    .action(
+      guarded(async (profile: string, command: string[]) => {
+        await runSshExec(profile, command);
+      })
+    );
 
   return ssh;
 }

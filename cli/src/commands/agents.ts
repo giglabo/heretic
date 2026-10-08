@@ -2,6 +2,7 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import { parsePortSpec } from "../utils/ports";
 import { getLogger, logRaw } from "../logger";
+import { revokeSshAccess } from "./ssh";
 import {
   loadAllProfiles,
   loadProfile,
@@ -1548,6 +1549,10 @@ export async function deleteAgent(name: string, options: DeleteAgentOptions): Pr
       associatedFiles.push({ path: settingsFile, label: "Claude settings" });
     }
 
+    // SSH access set up by `heretic-cli ssh setup` (removed by revokeSshAccess below)
+    const sshKey = join(hereticDir, "ssh", `${name}_ed25519`);
+    const hasSsh = existsSync(sshKey) || existsSync(join(hereticDir, "ssh", `${name}_known_hosts`));
+
     // Show what will be deleted
     if (containers.length > 0) {
       logRaw(`\nRunning containers (${containers.length}):`);
@@ -1563,6 +1568,9 @@ export async function deleteAgent(name: string, options: DeleteAgentOptions): Pr
       for (const file of associatedFiles) {
         logRaw(`  ${file.label}: ${file.path}`);
       }
+    }
+    if (hasSsh) {
+      logRaw("SSH access: the key files and its authorized_keys entry will be revoked");
     }
 
     // Confirm unless --force
@@ -1606,6 +1614,17 @@ export async function deleteAgent(name: string, options: DeleteAgentOptions): Pr
           );
         }
       }
+    }
+
+    // Revoke SSH access (authorized_keys line, keys ssh setup created)
+    let sshConfig;
+    try {
+      sshConfig = loadProfile(name).ssh;
+    } catch {
+      sshConfig = undefined;
+    }
+    for (const line of revokeSshAccess(name, sshConfig)) {
+      logRaw(`SSH: ${line}`);
     }
 
     // Delete profile

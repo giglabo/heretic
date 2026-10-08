@@ -7,7 +7,10 @@ import { getLogger } from "../logger";
  * so we fall back to numbered text input.
  */
 export function isCompiledBinary(): boolean {
-  return process.argv[0]?.includes("$bunfs") || process.argv[1]?.includes("$bunfs");
+  // /$bunfs/ on Unix, B:/~BUN/ on Windows
+  return [process.argv[0], process.argv[1]].some(
+    (arg) => arg?.includes("$bunfs") || arg?.includes("~BUN")
+  );
 }
 
 /**

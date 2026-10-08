@@ -23,7 +23,12 @@ import {
   resolveWorkspaceTarget,
 } from "../src/runners/ssh-backend";
 import {
+  authorizedKeyComment,
   buildAuthorizedKeysLine,
+  listKeyPairs,
+  managedKeyPath,
+  publicKeyBody,
+  removeAuthorizedKeyLines,
   buildKnownHostsLines,
   detectPresets,
   findCommandsOnPath,
@@ -285,5 +290,54 @@ describe("ssh setup helpers", () => {
   test("macOS protected folders", () => {
     expect(macProtectedFolder("/Users/me/Documents/app", "/Users/me")).toBe("/Users/me/Documents");
     expect(macProtectedFolder("/Users/me/code/app", "/Users/me")).toBeUndefined();
+  });
+});
+
+describe("ssh key management helpers", () => {
+  const keyA = "ssh-ed25519 AAAAkeyA";
+  const keyB = "ssh-ed25519 AAAAkeyB";
+
+  test("publicKeyBody finds the key after options", () => {
+    expect(publicKeyBody("restrict,pty ssh-ed25519 AAAAx heretic-p")).toBe("AAAAx");
+    expect(publicKeyBody("ecdsa-sha2-nistp256 AAAAy c")).toBe("AAAAy");
+    expect(publicKeyBody("garbage")).toBeUndefined();
+  });
+
+  test("removes only the profile's own line", () => {
+    const content = [
+      "ssh-rsa AAAApersonal me@laptop",
+      `restrict,pty ${keyA} heretic-one`,
+      `restrict,pty ${keyB} heretic-two`,
+      "",
+    ].join("\n");
+    const { content: out, removed } = removeAuthorizedKeyLines(content, "one");
+    expect(removed).toBe(1);
+    expect(out).toContain("AAAApersonal");
+    expect(out).toContain("heretic-two");
+    expect(out).not.toContain("heretic-one");
+  });
+
+  test("keeps the line while another profile uses the same key", () => {
+    const content = `restrict,pty ${keyA} heretic-one\n`;
+    const { removed } = removeAuthorizedKeyLines(content, "one", new Set(["AAAAkeyA"]));
+    expect(removed).toBe(0);
+  });
+
+  test("does not match a profile whose name is a prefix", () => {
+    const content = `restrict,pty ${keyA} heretic-one-two\n`;
+    expect(removeAuthorizedKeyLines(content, "one").removed).toBe(0);
+  });
+
+  test("listKeyPairs only returns private keys with a .pub", () => {
+    const dir = mkdtempSync(join(tmpdir(), "heretic-keys-"));
+    writeFileSync(join(dir, "id_ed25519"), "k");
+    writeFileSync(join(dir, "id_ed25519.pub"), "p");
+    writeFileSync(join(dir, "lonely"), "k");
+    writeFileSync(join(dir, "known_hosts"), "x");
+    expect(listKeyPairs(dir)).toEqual([join(dir, "id_ed25519")]);
+    expect(listKeyPairs(dir, ["id_rsa", "id_ed25519"])).toEqual([join(dir, "id_ed25519")]);
+    expect(listKeyPairs(join(dir, "missing"))).toEqual([]);
+    expect(managedKeyPath("/h/.heretic/ssh", "p")).toBe("/h/.heretic/ssh/p_ed25519");
+    expect(authorizedKeyComment("p")).toBe("heretic-p");
   });
 });

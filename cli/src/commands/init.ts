@@ -18,6 +18,7 @@ import {
   getProfilesDir,
 } from "../utils/profile-loader";
 import { promptList } from "../utils/prompt";
+import { promptSshSetup, revokeSshAccess } from "./ssh";
 import type { HereticSettings } from "../types";
 import { agentTypeFromProvider } from "../types/agent-profile";
 import type { AgentProfile } from "../types/agent-profile";
@@ -877,6 +878,9 @@ async function manageAgents(): Promise<void> {
       const profile = createAgentProfile(agentInput, secretScriptPath, settingsPath);
       saveProfile(agentInput.name, profile);
       logger.info(`✓ Created profile: ${profilePath}`);
+
+      // Host toolchains over SSH: key (new or reused), authorized_keys, host key, presets
+      await promptSshSetup(agentInput.name);
     } else if (action === "delete") {
       const deleteChoices = profiles.map((name) => ({
         name,
@@ -894,6 +898,17 @@ async function manageAgents(): Promise<void> {
       ]);
 
       if (confirmDelete.confirm) {
+        // Revoke SSH access before the profile (and its ssh block) is gone
+        let sshConfig;
+        try {
+          sshConfig = loadProfile(agentNameToDelete).ssh;
+        } catch {
+          sshConfig = undefined;
+        }
+        for (const line of revokeSshAccess(agentNameToDelete, sshConfig)) {
+          logger.info(`✓ SSH: ${line}`);
+        }
+
         const profilePath = join(getProfilesDir(), `${agentNameToDelete}.yaml`);
         const scriptPath = join(hereticDir, `get-${agentNameToDelete}-key.sh`);
         const settingsPath = join(hereticDir, `${agentNameToDelete}-settings.json`);
