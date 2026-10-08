@@ -532,6 +532,15 @@ mapped). A server started this way listens on the **host**: reach it from the co
 - **Remote build host (not the Docker host):** nothing syncs files; `host_cwd` must hold
   the same tree the agent edits.
 - **Login shell:** `fish`/`csh` as the host user's login shell are not supported (quoting).
+- **Login shell cost:** a login shell re-reads the user's profile (Homebrew, nvm, …) on *every*
+  call — measured ~0.5 s per call on a developer Mac vs ~40 ms with the PATH that `ssh setup`
+  captures into `ssh.host_path` (`login_shell` is then off by default). Re-run `ssh setup`
+  after installing new toolchains so the captured PATH includes them.
+- **macOS SSH access list:** with Remote Login limited to "Only these users", macOS checks the
+  `com.apple.access_ssh` group (often via the nested `admin` group); a user outside it gets the
+  same `Permission denied` as a missing key. Check with
+  `dseditgroup -o checkmember -m "$(id -un)" com.apple.access_ssh`.
+- **User names with `@`** (directory accounts such as `name@company.com`) work as `ssh.user`.
 - **sshd file modes:** sshd ignores `authorized_keys` when `~/.ssh` or the home directory is
   group/world-writable; `ssh setup` tightens `~/.ssh` to 0700 and warns about the home dir.
 - **Failed-login penalties (OpenSSH ≥ 9.8):** after failed authentications sshd's

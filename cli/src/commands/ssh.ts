@@ -149,10 +149,26 @@ function probeCommands(t: Target, names: readonly string[], hostPath?: string): 
   return names.filter((n) => found.has(n));
 }
 
+/**
+ * macOS: Remote Login limited to "Only these users" is enforced through the
+ * com.apple.access_ssh group (often via nested `admin`). Returns false only
+ * when the group exists and `user` is not a member.
+ */
+function macSshAllowed(user: string): boolean {
+  if (process.platform !== "darwin") return true;
+  const res = spawnSync("dseditgroup", ["-o", "checkmember", "-m", user, "com.apple.access_ssh"], {
+    encoding: "utf8",
+  });
+  return !(res.status !== null && res.stdout.trim().startsWith("no "));
+}
+
 /** Hint for a failed login, chosen from ssh's error text. */
 function sshdHint(local: boolean, stderr = ""): string {
   if (/host key|known_hosts/i.test(stderr)) {
     return "the host key does not match the pinned one: re-run `heretic-cli ssh setup` (or check for a MITM)";
+  }
+  if (/permission denied/i.test(stderr) && local && !macSshAllowed(currentUser())) {
+    return 'macOS allows Remote Login only for some users and you are not one: System Settings → General → Sharing → Remote Login (i) → Allow access for, or `sudo dseditgroup -o edit -a "$(id -un)" -t user com.apple.access_ssh`';
   }
   if (/permission denied/i.test(stderr)) {
     return local
@@ -520,6 +536,12 @@ export async function runSshCheck(profileName: string, options: CheckOptions): P
     knownHosts: ssh.known_hosts,
     local,
   };
+
+  if (local && !macSshAllowed(target.user)) {
+    bad(
+      `macOS Remote Login does not allow ${target.user} (com.apple.access_ssh): System Settings → General → Sharing → Remote Login (i)`
+    );
+  }
 
   // Login + workspace dir
   const hostCwd = spec.env.SSH_HOST_CWD;

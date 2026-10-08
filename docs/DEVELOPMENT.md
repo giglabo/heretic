@@ -100,6 +100,12 @@ exit (`--keep` leaves it for debugging). It is bash 3.2 compatible (macOS `/bin/
 Prerequisites on a Mac: **Remote Login** on (System Settings → General → Sharing) and
 Docker Desktop. On Linux: `openssh-server` listening on the Docker bridge too.
 
+Verified on a real setup (Linux container on Docker Desktop → Apple Silicon Mac, macOS 26,
+directory user `name@company.com`, `/bin/bash` 3.2 login shell): `make`/`cc` produce a Mach-O
+on the Mac, `cargo build --release` with a container `--manifest-path` builds there and
+`auto-run` runs the result on the Mac; 20 parallel calls pass; an interrupted command is
+killed on the Mac; ~40 ms per call with the captured PATH, ~0.5 s with a login shell.
+
 Any profile can be poked the same way by hand:
 
 ```bash
