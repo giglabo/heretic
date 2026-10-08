@@ -85,8 +85,8 @@ bind-mounted config resolvable.
 Caveat: `docker exec` into that container shows `HOME=/root` because exec is a fresh login
 that does not inherit the entrypoint's exports — PID 1 (your session shell) has
 `HOME=/home/agent`.
-`--root` is hoisted by `hoistRootFlag()` so it works before *or* after the agent name, but
-never after a `--` separator.
+`--root` (like every run option) works before *or* after the agent name — `normalizeRunArgv()`
+moves the option block after the agent name in front of it — but never after a `--` separator.
 
 **`--sidecar <rt>` / `--builder-image <rt>=<img>` / `--disable-sidecars`** — see
 `heretic-sidecars`. Summary: `--sidecar` **replaces** the profile's sidecar list for this

@@ -100,12 +100,16 @@ option and the program uses `enablePositionalOptions()`.
 
 ## argv parsing: two non-obvious mechanisms
 
-**1. `hoistRootFlag()` (`cli/src/index.ts`).** `run` uses Commander's
-`passThroughOptions()`, so anything after the agent name belongs to the *container*
-command. A bare `--root` typed late (`heretic-cli run claude --root`) would be swallowed.
-Before parsing, argv is rewritten: the first `--root` found before any `--` separator is
-moved to immediately after the command keyword. Tokens after `--` are never touched.
-Consequence: `heretic-cli run claude -- npm test --root` keeps `--root` as an npm flag.
+**1. `normalizeRunArgv()` (`cli/src/utils/run-argv.ts`, called from `cli/src/index.ts`).**
+`run` uses Commander's `passThroughOptions()`, so anything after the agent name would belong
+to the *container* command, and `run claude -s two --root` would silently run with session
+`default` and command `-s two`. Before parsing, argv is rewritten for `run` only: the block of
+known run options (from the Commander `run` definition, with their values; `--x=v` and `-sV`
+forms included) directly after the agent name is moved in front of it. The custom command
+starts at the first token that is not a known run option, so `run claude npm test -s x` keeps
+`-s x` for npm. A bare `--root` anywhere before `--` is also hoisted (legacy behaviour).
+Tokens after `--` are never touched: `heretic-cli run claude -- npm test --root` keeps
+`--root` as an npm flag.
 
 **2. `program.on("command:*")` — the bare-agent-name shortcut.** `heretic-cli claude` is
 equivalent to `heretic-cli run claude`. This path does **not** go through Commander

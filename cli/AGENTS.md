@@ -442,7 +442,7 @@ For non-copilot agents (claude, aider, generic), the docker-runner automatically
 
 Set `extra.run_as_root: true` in a profile — or pass `--root` to `heretic-cli run <agent>` (also works on the `heretic-cli <agent>` shortcut) — to keep the container running as **root** instead of the image's `agent` user. The `--root` flag is a CLI override that sets `extra.run_as_root` for that run only; it is only applied when explicitly passed, so it never clobbers a profile's value when absent. The runners (`docker-runner.ts`, `compose-runner.ts`) force `User: root` and inject `HERETIC_RUN_AS_ROOT=1`. The entrypoint's root-mode block (top of `entrypoint.sh`) then exports `HOME=/home/agent` and `USER=root` before anything else runs. Keeping `HOME=/home/agent` means all bind-mounted config (claude settings, `.claude.json`, auth, ssh keys) still resolves under `$HOME`.
 
-**No image rebuild required.** The root branch lives in `entrypoint.sh`, which is baked into the image as its `ENTRYPOINT` (`/entrypoint.sh`) — but when `run_as_root` is set, the runners write the current binary-embedded entrypoint to the session dir and bind-mount it over `/entrypoint.sh` (read-only), so the flag works on images built before the feature existed. The `--root` flag is parsed regardless of position on the command line (`run cs --root` and `run --root cs` both work); `src/index.ts` `hoistRootFlag()` moves a bare `--root` ahead of the agent name so `passThroughOptions()` doesn't swallow it, while leaving anything after a `--` separator (the custom command) untouched.
+**No image rebuild required.** The root branch lives in `entrypoint.sh`, which is baked into the image as its `ENTRYPOINT` (`/entrypoint.sh`) — but when `run_as_root` is set, the runners write the current binary-embedded entrypoint to the session dir and bind-mount it over `/entrypoint.sh` (read-only), so the flag works on images built before the feature existed. The `--root` flag is parsed regardless of position on the command line (`run cs --root` and `run --root cs` both work); see "Run option order" below.
 
 Note: `docker exec` into a root container reports `HOME=/root` because it's a fresh login shell that doesn't inherit the entrypoint's exported env. The real session process (PID 1) has `HOME=/home/agent` — verify with `tr '\0' '\n' < /proc/1/environ | grep HOME`.
 
@@ -456,6 +456,16 @@ Every heretic-managed container gets these labels:
 | `heretic.agent` | Profile name | Agent profile used to create the container |
 | `heretic.project` | Absolute path | Project directory the container was started from |
 | `heretic.session` | Session name | Session name (default: `"default"`) |
+
+**Run option order.** `run` uses `passThroughOptions()` so a custom command keeps its own flags
+(`run cs npm test --watch`). To still accept heretic's options after the agent name,
+`normalizeRunArgv()` (`src/utils/run-argv.ts`, called from `src/index.ts`) rewrites argv before
+parsing: the block of known `run` options (with values; `--x=v` and `-sV` forms too) directly after
+the agent name is moved in front of it, so `run cs --root -s two` and `run cs -s two --root` parse
+like `run --root -s two cs`. The custom command starts at the first token that is not a known run
+option; a bare `--root` anywhere before `--` is also hoisted (legacy). Tokens after `--` are never
+touched. The option list comes from the Commander `run` command itself, so new run options are
+covered automatically. The bare-agent shortcut parses argv itself and is not rewritten.
 
 **Sessions and naming.** The agent container is `heretic-<profile>-<session>-<hash8>`
 (`getAgentContainerName()` in `src/utils/session.ts`, shared by the docker and compose runners;

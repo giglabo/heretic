@@ -47,6 +47,11 @@ What sessions do **not** separate:
   fails with Docker's "port is already allocated". Use `--no-ports` or `--port-offset <n>` for it.
   Preset ports that are already taken are skipped automatically (see below).
 
+`run` options may go before or after the agent name, in any order (`run myagent --root -s b` ≡
+`run -s b --root myagent`). Everything from the first word that is not a `run` option is the
+command to run in the container (`run myagent -s b npm test --watch`); after `--` nothing is
+treated as a heretic option.
+
 Manage sessions with `heretic-cli ps` (shows the session), `heretic-cli attach <profile> -s <session>`
 and `heretic-cli stop -s <session>`.
 

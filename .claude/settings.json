@@ -6,7 +6,10 @@
       "Write",
       "Bash",
       "WebFetch",
-      "mcp__*",
+      "mcp__context7__*",
+      "mcp__watchword__*",
+      "mcp__lazy-shot__*",
+      "mcp__n8n__*",
       "mcp__trello__*",
       "WebSearch",
       "Skill"
