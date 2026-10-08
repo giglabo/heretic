@@ -200,9 +200,23 @@ function passwdHome(): string {
  * under `sudo -E` and similar.
  */
 function authorizeLocally(pubKey: string, comment: string, from?: string): void {
-  const dir = join(passwdHome(), ".ssh");
+  const home = passwdHome();
+  const dir = join(home, ".ssh");
   const file = join(dir, "authorized_keys");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // sshd (StrictModes) ignores authorized_keys when ~/.ssh or the home directory
+  // is group/world-writable — e.g. a 0777 ~/.ssh as on GitHub's macOS runners.
+  if (process.platform !== "win32") {
+    if (statSync(dir).mode & 0o022) {
+      chmodSync(dir, 0o700);
+      logRaw(`  ✓ tightened ${dir} to 0700 (sshd refuses keys in a writable ~/.ssh)`);
+    }
+    if (statSync(home).mode & 0o022) {
+      logRaw(
+        `  ! ${home} is group/world-writable: sshd will refuse the key (chmod go-w "${home}")`
+      );
+    }
+  }
   const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
   if (hasAuthorizedKey(existing, pubKey)) {
     logRaw(`  ✓ key already in ${file}`);

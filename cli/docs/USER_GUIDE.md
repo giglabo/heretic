@@ -512,6 +512,12 @@ mapped). A server started this way listens on the **host**: reach it from the co
 - **Remote build host (not the Docker host):** nothing syncs files; `host_cwd` must hold
   the same tree the agent edits.
 - **Login shell:** `fish`/`csh` as the host user's login shell are not supported (quoting).
+- **sshd file modes:** sshd ignores `authorized_keys` when `~/.ssh` or the home directory is
+  group/world-writable; `ssh setup` tightens `~/.ssh` to 0700 and warns about the home dir.
+- **Failed-login penalties (OpenSSH ≥ 9.8):** after failed authentications sshd's
+  `PerSourcePenalties` drops *all* connections from that source for a while — a wrong key
+  then also breaks the next, correct calls with `Connection reset by peer`. Fix the key and
+  wait, or check the host's sshd log.
 
 #### Where things live
 
