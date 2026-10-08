@@ -30,6 +30,7 @@ import {
   hasUsableMcpConfig,
 } from "./mcp-helper";
 import { SidecarManager, type SidecarWiring } from "./sidecar-manager";
+import { appendBinds, prepareSshBackend } from "./ssh-backend";
 import { loadSettings, resolveToken } from "../utils/settings";
 import { ensureSessionDir, getAgentContainerName } from "../utils/session";
 import { generateEntrypoint } from "../templates";
@@ -433,18 +434,13 @@ export class DockerRunner implements Runner {
       logger.debug({ entrypointPath }, "Mounting run-as-root entrypoint override");
     }
 
-    // SSH config → env vars + key bind
-    if (config.ssh) {
-      env.push(`SSH_HOST=${config.ssh.host}`);
-      env.push(`SSH_PORT=${config.ssh.port ?? 22}`);
-      env.push(`SSH_USER=${config.ssh.user ?? "agent"}`);
-      if (config.ssh.key_path) {
-        env.push(`SSH_KEY_PATH=${config.ssh.key_path}`);
-        binds.push(`${config.ssh.key_path}:/home/agent/.ssh/id_rsa:ro`);
+    // SSH backend → SSH_* env, key/known_hosts binds, client overrides, host-gateway
+    const sshSpec = prepareSshBackend(config);
+    if (sshSpec) {
+      for (const [key, value] of Object.entries(sshSpec.env)) {
+        env.push(`${key}=${value}`);
       }
-      if (config.ssh.host_cwd) {
-        env.push(`SSH_HOST_CWD=${config.ssh.host_cwd}`);
-      }
+      appendBinds(binds, sshSpec.binds);
     }
 
     // MCP config → temp file + bind (skip if existing MCP config found in workspace unless override enabled)
@@ -573,6 +569,7 @@ export class DockerRunner implements Runner {
         Memory: memory,
         NanoCpus: nanoCpus,
         ShmSize: shmSize,
+        ExtraHosts: sshSpec?.extraHosts.length ? sshSpec.extraHosts : undefined,
       },
       User: extra.run_as_root ? "root" : extra.user,
       Hostname: extra.hostname,

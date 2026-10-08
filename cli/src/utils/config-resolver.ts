@@ -17,6 +17,7 @@ import type {
 } from "../types/agent-profile";
 import { providerFromAgentType, SIDECAR_RUNTIMES } from "../types/agent-profile";
 import { buildPortMappings, formatPortMappings, type PortMapping } from "./ports";
+import { isDockerHostTarget, validateSshCommands } from "./ssh-presets";
 import { getLogger } from "../logger";
 
 const logger = getLogger();
@@ -187,6 +188,12 @@ export function resolveConfig(options: ResolveOptions): ResolvedAgentConfig {
   if (resolved.toolBackends?.sidecars?.length && resolved.ssh) {
     logger.warn(
       "Both build sidecars and the SSH backend are configured; a single build would span two different filesystems. Prefer one tool-execution backend per project (spec gap B-5)."
+    );
+  }
+
+  if (resolved.ssh && isDockerHostTarget(resolved.ssh.host) && process.platform === "win32") {
+    logger.warn(
+      "ssh.host 'docker-host' targets a Windows machine: its OpenSSH shell is cmd/PowerShell and the workspace path cannot be mapped, so routed commands will not work. Use a Linux/macOS build host or WSL."
     );
   }
 
@@ -469,6 +476,34 @@ export function validateResolvedConfig(config: ResolvedAgentConfig): string[] {
     if (config.ssh.key_path !== undefined && !isAbsolute(config.ssh.key_path)) {
       errors.push(`ssh.key_path must be an absolute path: ${config.ssh.key_path}`);
     }
+    if (config.ssh.known_hosts !== undefined && !isAbsolute(config.ssh.known_hosts)) {
+      errors.push(`ssh.known_hosts must be an absolute path: ${config.ssh.known_hosts}`);
+    }
+    const { connect_timeout, control_persist, max_sessions } = config.ssh;
+    if (
+      connect_timeout !== undefined &&
+      !(Number.isInteger(connect_timeout) && connect_timeout > 0)
+    ) {
+      errors.push("ssh.connect_timeout must be a positive integer");
+    }
+    if (
+      control_persist !== undefined &&
+      !(Number.isInteger(control_persist) && control_persist >= 0)
+    ) {
+      errors.push("ssh.control_persist must be a non-negative integer");
+    }
+    if (
+      max_sessions !== undefined &&
+      !(Number.isInteger(max_sessions) && max_sessions >= 1 && max_sessions <= 64)
+    ) {
+      errors.push("ssh.max_sessions must be an integer between 1 and 64");
+    }
+    for (const name of config.ssh.env_passthrough ?? []) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        errors.push(`ssh.env_passthrough: invalid variable name '${name}'`);
+      }
+    }
+    errors.push(...validateSshCommands(config.ssh));
   }
 
   // Validate tool_backends (build sidecars) if present

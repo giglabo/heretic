@@ -242,8 +242,8 @@ describe("resource scripts", () => {
   it("SSH_EXEC_SCRIPT is a valid bash script", () => {
     expect(SSH_EXEC_SCRIPT).toStartWith("#!/bin/bash");
     expect(SSH_EXEC_SCRIPT).toContain("SSH_HOST");
-    expect(SSH_EXEC_SCRIPT).toContain("exec ssh");
-    expect(SSH_EXEC_SCRIPT).toContain("set -euo pipefail");
+    expect(SSH_EXEC_SCRIPT).toContain("BatchMode=yes");
+    expect(SSH_EXEC_SCRIPT).toContain("set -uo pipefail");
   });
 
   it("sidecar-exec encodes argv without jq's --args (jq 1.6 flag-parsing bug)", () => {

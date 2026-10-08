@@ -253,11 +253,34 @@ describe("DockerRunner", () => {
     expect(options.Env).toContain("SSH_HOST=dev-server.example.com");
     expect(options.Env).toContain("SSH_PORT=2222");
     expect(options.Env).toContain("SSH_USER=myuser");
-    expect(options.Env).toContain("SSH_KEY_PATH=/home/user/.ssh/id_ed25519");
+    expect(options.Env).toContain("SSH_KEY_PATH=/etc/heretic/ssh/key");
     expect(options.Env).toContain("SSH_HOST_CWD=/remote/workspace");
     expect(options.HostConfig?.Binds).toContain(
-      "/home/user/.ssh/id_ed25519:/home/agent/.ssh/id_rsa:ro"
+      "/home/user/.ssh/id_ed25519:/etc/heretic/ssh/key:ro"
     );
+    expect(options.HostConfig?.ExtraHosts).toBeUndefined();
+  });
+
+  test("translateConfig wires docker-host: host-gateway, project dir, known_hosts", () => {
+    const configWithSsh: ResolvedAgentConfig = {
+      ...mockConfig,
+      volumes: [{ source: mockConfig.projectDir, target: "/workspace" }],
+      ssh: {
+        host: "docker-host",
+        user: "me",
+        known_hosts: "/home/me/.heretic/ssh/p_known_hosts",
+        host_path: "/usr/local/bin:/usr/bin:/bin",
+      },
+    };
+    const runner = new DockerRunner(configWithSsh);
+    const options = (runner as any).translateConfig();
+    expect(options.Env).toContain("SSH_HOST=host.docker.internal");
+    expect(options.Env).toContain(`SSH_HOST_CWD=${mockConfig.projectDir}`);
+    expect(options.Env).toContain("SSH_KNOWN_HOSTS=/etc/heretic/ssh/known_hosts");
+    expect(options.Env).toContain("SSH_HOST_PATH=/usr/local/bin:/usr/bin:/bin");
+    // host_path given → no login shell needed
+    expect(options.Env.some((e: string) => e.startsWith("SSH_LOGIN_SHELL="))).toBe(false);
+    expect(options.HostConfig?.ExtraHosts).toEqual(["host.docker.internal:host-gateway"]);
   });
 
   test("translateConfig uses SSH defaults for port and user", () => {

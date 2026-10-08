@@ -1,0 +1,133 @@
+name: Images
+
+# Prebuilt images for every toolchain preset, built with heretic-cli itself:
+#   ghcr.io/<owner>/heretic-builder-<runtime>:<tag>   build sidecars (node python java go rust)
+#   ghcr.io/<owner>/heretic-agent:<tag>-slim          agent only — toolchains via sidecars / SSH
+#   ghcr.io/<owner>/heretic-agent:<tag>-full          agent + every built-in toolchain
+# All images are multi-arch (linux/amd64 + linux/arm64).
+#
+# Tags: a release tag vX.Y.Z publishes X.Y.Z and moves `latest`; the weekly
+# schedule and manual runs publish `edge` (fresh base images and toolchains).
+
+on:
+  push:
+    tags:
+      - "v*"
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish"
+        required: false
+        default: edge
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  cli:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      latest: ${{ steps.meta.outputs.latest }}
+      registry: ${{ steps.meta.outputs.registry }}
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun build ./src/index.ts --compile --target=bun-linux-x64 --outfile dist/heretic-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heretic-cli-linux-x64
+          path: cli/dist/heretic-cli
+          retention-days: 1
+      - id: meta
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ inputs.tag || 'edge' }}" >> "$GITHUB_OUTPUT"
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
+          # GHCR paths must be lowercase
+          echo "registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+  builders:
+    needs: cli
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, python, java, go, rust]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: heretic-cli-linux-x64
+      - run: chmod +x heretic-cli
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push heretic-builder-${{ matrix.runtime }}
+        run: |
+          ./heretic-cli image build-sidecar ${{ matrix.runtime }} \
+            --registry "${{ needs.cli.outputs.registry }}" \
+            --tag "${{ needs.cli.outputs.tag }}" \
+            --arch both --push
+      - name: Move latest
+        if: needs.cli.outputs.latest == 'true'
+        run: |
+          img="${{ needs.cli.outputs.registry }}/heretic-builder-${{ matrix.runtime }}"
+          docker buildx imagetools create -t "$img:latest" "$img:${{ needs.cli.outputs.tag }}"
+
+  agents:
+    needs: cli
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: slim
+            flags: ""
+          - variant: full
+            flags: "--with-all"
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: heretic-cli-linux-x64
+      - run: chmod +x heretic-cli
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push heretic-agent (${{ matrix.variant }})
+        run: |
+          ./heretic-cli image build ${{ matrix.flags }} \
+            --name heretic-agent \
+            --registry "${{ needs.cli.outputs.registry }}" \
+            --tag "${{ needs.cli.outputs.tag }}-${{ matrix.variant }}" \
+            --arch both --push
+      - name: Move latest
+        if: needs.cli.outputs.latest == 'true'
+        run: |
+          img="${{ needs.cli.outputs.registry }}/heretic-agent"
+          docker buildx imagetools create -t "$img:latest-${{ matrix.variant }}" "$img:${{ needs.cli.outputs.tag }}-${{ matrix.variant }}"

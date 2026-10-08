@@ -22,6 +22,7 @@ import { getDockerSocketMountSource } from "../utils/docker";
 import { loadSettings, resolveToken } from "../utils/settings";
 import { ensureSessionDir, getAgentContainerName, projectDirHash } from "../utils/session";
 import { generateEntrypoint } from "../templates";
+import { appendBinds, prepareSshBackend } from "./ssh-backend";
 import { getLogger } from "../logger";
 
 const logger = getLogger();
@@ -274,18 +275,11 @@ export class ComposeRunner implements Runner {
       volumes.push(`${entrypointPath}:/entrypoint.sh:ro`);
     }
 
-    // SSH config → env vars + key bind
-    if (config.ssh) {
-      environment.SSH_HOST = config.ssh.host;
-      environment.SSH_PORT = String(config.ssh.port ?? 22);
-      environment.SSH_USER = config.ssh.user ?? "agent";
-      if (config.ssh.key_path) {
-        environment.SSH_KEY_PATH = config.ssh.key_path;
-        volumes.push(`${config.ssh.key_path}:/home/agent/.ssh/id_rsa:ro`);
-      }
-      if (config.ssh.host_cwd) {
-        environment.SSH_HOST_CWD = config.ssh.host_cwd;
-      }
+    // SSH backend → SSH_* env, key/known_hosts binds, client overrides, host-gateway
+    const sshSpec = prepareSshBackend(config);
+    if (sshSpec) {
+      Object.assign(environment, sshSpec.env);
+      appendBinds(volumes, sshSpec.binds);
     }
 
     // Build sidecars → BUILD_SIDECARS env for the agent's tool wrappers, plus
@@ -447,6 +441,10 @@ export class ComposeRunner implements Runner {
 
     if (extra.network) {
       agentService.network_mode = extra.network;
+    }
+
+    if (sshSpec?.extraHosts.length) {
+      agentService.extra_hosts = sshSpec.extraHosts;
     }
 
     // Add port bindings if specified

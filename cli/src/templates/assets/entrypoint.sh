@@ -51,8 +51,22 @@ setup_tool_wrappers() {
         done < <(echo "$BUILD_SIDECARS" | jq -r 'keys[]' 2>/dev/null || true)
     fi
 
+    # SSH backend: route exactly the commands listed in SSH_COMMANDS (expanded
+    # from the profile's ssh.presets / ssh.commands by heretic-cli). Images run
+    # by other orchestrators may set only SSH_HOST: fall back to every runtime
+    # command, which was the original behaviour.
+    declare -A SSH_CMDS=()
     local has_ssh="false"
-    [[ -n "${SSH_HOST:-}" ]] && has_ssh="true"
+    if [[ -n "${SSH_HOST:-}" ]]; then
+        has_ssh="true"
+        local ssh_list="${SSH_COMMANDS:-}"
+        if [[ -z "$ssh_list" ]]; then
+            ssh_list="${RUNTIME_COMMANDS[*]}"
+        fi
+        for cmd in ${ssh_list//,/ }; do
+            SSH_CMDS["$cmd"]=1
+        done
+    fi
 
     if [[ ${#SIDECAR_RUNTIMES[@]} -eq 0 ]] && [[ "$has_ssh" == "false" ]]; then
         return 0
@@ -68,37 +82,99 @@ setup_tool_wrappers() {
     fi
     rm -f "$WRAPPER_DIR/.probe"
 
-    local wrapper_count=0
+    # Never shadow the shell, ssh itself, privilege tools or the agent CLIs: a
+    # wrapper for any of these would hand the agent's own process to the host.
+    declare -A SSH_DENY=()
+    for cmd in ssh scp sftp ssh-agent ssh-add sh bash dash zsh fish env sudo su \
+        exec nohup timeout claude copilot opencode gemini aider heretic-cli \
+        ssh-exec sidecar-exec; do
+        SSH_DENY["$cmd"]=1
+    done
 
+    declare -A CMD_RUNTIME=()
+    local -a candidates=()
     for runtime in "${!RUNTIME_COMMANDS[@]}"; do
         for cmd in ${RUNTIME_COMMANDS[$runtime]}; do
-            local clean_path
-            clean_path=$(echo "$PATH" | tr ':' '\n' | grep -v "$WRAPPER_DIR" | tr '\n' ':' | sed 's/:$//')
-            if PATH="$clean_path" command -v "$cmd" >/dev/null 2>&1; then
-                continue
-            fi
+            CMD_RUNTIME["$cmd"]="$runtime"
+            candidates+=("$cmd")
+        done
+    done
+    for cmd in "${!SSH_CMDS[@]}"; do
+        [[ -z "${CMD_RUNTIME[$cmd]+x}" ]] && candidates+=("$cmd")
+    done
 
-            if [[ -n "${SIDECAR_RUNTIMES[$runtime]+x}" ]]; then
-                cat > "$WRAPPER_DIR/$cmd" <<WRAPPER
+    local clean_path
+    clean_path=$(echo "$PATH" | tr ':' '\n' | grep -v "$WRAPPER_DIR" | tr '\n' ':' | sed 's/:$//')
+
+    local wrapper_count=0
+    local -a ssh_candidates=()
+
+    for cmd in "${candidates[@]}"; do
+        # Names end up in a heredoc and a file name: accept plain tokens only.
+        [[ "$cmd" =~ ^[A-Za-z0-9._+-]+$ ]] || continue
+
+        # The container always wins.
+        if PATH="$clean_path" command -v "$cmd" >/dev/null 2>&1; then
+            continue
+        fi
+
+        local runtime="${CMD_RUNTIME[$cmd]:-}"
+        if [[ -n "$runtime" ]] && [[ -n "${SIDECAR_RUNTIMES[$runtime]+x}" ]]; then
+            cat > "$WRAPPER_DIR/$cmd" <<WRAPPER
 #!/bin/bash
 exec /opt/sidecar/sidecar-exec "$runtime" "$cmd" "\$@"
 WRAPPER
-                chmod +x "$WRAPPER_DIR/$cmd"
-                wrapper_count=$((wrapper_count + 1))
-                continue
-            fi
+            chmod +x "$WRAPPER_DIR/$cmd"
+            wrapper_count=$((wrapper_count + 1))
+            continue
+        fi
 
-            if [[ "$has_ssh" == "true" ]]; then
-                cat > "$WRAPPER_DIR/$cmd" <<WRAPPER
+        if [[ -n "${SSH_CMDS[$cmd]+x}" ]] && [[ -z "${SSH_DENY[$cmd]+x}" ]]; then
+            ssh_candidates+=("$cmd")
+        fi
+    done
+
+    if [[ ${#ssh_candidates[@]} -gt 0 ]]; then
+        local -a ssh_routed=("${ssh_candidates[@]}")
+
+        # Ask the host which of the candidates it actually has (one round trip;
+        # it also opens the shared connection). On failure keep them all, so the
+        # commands start working once the host becomes reachable.
+        if [[ "${SSH_PROBE:-1}" != "0" ]]; then
+            local found
+            if found=$(SSH_CONNECT_TIMEOUT="${SSH_PROBE_TIMEOUT:-5}" /opt/sidecar/ssh-exec --probe "${ssh_candidates[@]}" 2>/tmp/heretic-ssh-probe.err); then
+                ssh_routed=()
+                local -A on_host=()
+                for cmd in $found; do on_host["$cmd"]=1; done
+                for cmd in "${ssh_candidates[@]}"; do
+                    [[ -n "${on_host[$cmd]+x}" ]] && ssh_routed+=("$cmd")
+                done
+                echo "SSH backend: ${SSH_USER:-agent}@${SSH_HOST}:${SSH_PORT:-22} reachable; ${#ssh_routed[@]}/${#ssh_candidates[@]} commands found on host"
+            else
+                echo "WARNING: SSH backend ${SSH_USER:-agent}@${SSH_HOST}:${SSH_PORT:-22} unreachable at start-up; routing all ${#ssh_candidates[@]} listed commands anyway" >&2
+                sed 's/^/         /' /tmp/heretic-ssh-probe.err >&2 || true
+            fi
+        fi
+
+        for cmd in "${ssh_routed[@]}"; do
+            cat > "$WRAPPER_DIR/$cmd" <<WRAPPER
 #!/bin/bash
 exec /opt/sidecar/ssh-exec "$cmd" "\$@"
 WRAPPER
-                chmod +x "$WRAPPER_DIR/$cmd"
-                wrapper_count=$((wrapper_count + 1))
-                continue
-            fi
+            chmod +x "$WRAPPER_DIR/$cmd"
+            wrapper_count=$((wrapper_count + 1))
         done
-    done
+    fi
+
+    # Universal launchers: run anything on the host (`host-run`), or locally when
+    # the container can execute it and on the host otherwise (`auto-run`) — e.g.
+    # the binary a host-side `cargo build` just produced.
+    if [[ "$has_ssh" == "true" ]] && [[ "${SSH_HOST_RUN:-1}" != "0" ]]; then
+        printf '#!/bin/bash\nexec /opt/sidecar/ssh-exec --run "$@"\n' > "$WRAPPER_DIR/host-run"
+        printf '#!/bin/bash\nexec /opt/sidecar/ssh-exec --auto "$@"\n' > "$WRAPPER_DIR/auto-run"
+        chmod +x "$WRAPPER_DIR/host-run" "$WRAPPER_DIR/auto-run"
+        echo "Host launchers: host-run <cmd> (always host), auto-run <cmd> (local if runnable, else host)"
+    fi
 
     if [[ $wrapper_count -gt 0 ]]; then
         echo "Tool wrappers: $wrapper_count commands configured"

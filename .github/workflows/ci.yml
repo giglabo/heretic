@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feat/**"]
   pull_request:
     branches: [main]
 
@@ -61,3 +61,93 @@ jobs:
         run: bun dist/heretic-cli.js --version
       - name: Verify npm pack
         run: npm pack --dry-run
+
+  # Native binaries for every release target, cross-compiled from Linux, so a
+  # PR that breaks `bun build --compile` (e.g. a missing text asset) fails here
+  # and not at release time. Artifacts are kept for a week for manual testing.
+  binaries:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    strategy:
+      matrix:
+        include:
+          - target: bun-linux-x64
+            artifact: heretic-cli-linux-x64
+          - target: bun-linux-arm64
+            artifact: heretic-cli-linux-arm64
+          - target: bun-darwin-x64
+            artifact: heretic-cli-macos-x64
+          - target: bun-darwin-arm64
+            artifact: heretic-cli-macos-arm64
+          - target: bun-windows-x64
+            artifact: heretic-cli-windows.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun build ./src/index.ts --compile --target=${{ matrix.target }} --outfile dist/${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: cli/dist/${{ matrix.artifact }}
+          retention-days: 7
+
+  # The compiled binary starts on each OS and the embedded assets are intact.
+  smoke:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: cli
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun build ./src/index.ts --compile --outfile dist/heretic-cli
+      - run: ./dist/heretic-cli --version
+      - run: ./dist/heretic-cli ssh presets
+      - name: Embedded ssh-exec matches the source asset
+        run: diff <(./dist/heretic-cli image generate --format ssh-exec) src/templates/assets/ssh-exec
+
+  # SSH backend against a real sshd on the runner, then from a real container
+  # that reaches the runner through host-gateway (the docker-host topology).
+  ssh-e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun build ./src/index.ts --compile --outfile dist/heretic-cli
+      - name: Install sshd
+        run: sudo apt-get update -q && sudo apt-get install -y -q openssh-server
+      - name: Lint shell assets
+        run: shellcheck -S warning src/templates/assets/ssh-exec tests/e2e/ssh-e2e.sh
+      - name: SSH e2e (host + CLI + container)
+        run: sudo env E2E_CONTAINER=1 E2E_LISTEN=0.0.0.0 HERETIC_CLI="$PWD/dist/heretic-cli" bash tests/e2e/ssh-e2e.sh
+
+  exec-server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli/build-sidecars/exec-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/build-sidecars/exec-server/go.mod
+      - run: go vet ./...
+      - run: CGO_ENABLED=0 go build -trimpath -o /dev/null .

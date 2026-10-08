@@ -100,7 +100,7 @@ Static assets live in `src/templates/assets/`:
 | `Dockerfile.hbs` | Handlebars template for Dockerfile generation |
 | `entrypoint.sh` | Universal container entrypoint script (baked as the image `ENTRYPOINT`; resolves tool backends → `exec "$@"`) |
 | `sidecar-exec` | HTTP build-sidecar **client** — routes a wrapped command to `POST /exec` on the sidecar for its runtime. Encodes argv with incremental `jq --arg` (NOT `$ARGS.positional --args`, which breaks on jq 1.6 — Debian bookworm — for any dash-flag) |
-| `ssh-exec` | SSH backend for tool command routing |
+| `ssh-exec` | SSH backend **client**: maps `$SSH_WORKSPACE`→`$SSH_HOST_CWD` (cwd + absolute args), POSIX quoting, `BatchMode`, strict host keys when `SSH_KNOWN_HOSTS` exists, ControlMaster under a flock'd master + `SSH_MAX_SESSIONS` slots, kills the remote process tree on TERM/INT/HUP; `--check` / `--probe <cmd>…` modes |
 
 The **server** side is vendored under `build-sidecars/` (outside `src/`, so lint/format skip it):
 
@@ -327,6 +327,26 @@ on-ramp. Inspect artefacts with `image generate --format sidecar-dockerfile --ru
 
 The SSH backend (top-level `ssh:` block) is the sibling backend and resolves into the same wrapper
 mechanism via `ssh-exec`; prefer one backend per project.
+
+#### SSH backend
+
+Routing order per command: **container binary > sidecar for its runtime > SSH host**, and SSH
+only for commands in `SSH_COMMANDS` (expanded from `ssh.presets` + `ssh.commands`; default
+presets node/python/java/go/rust). Code map:
+
+| File | Role |
+|------|------|
+| `src/utils/ssh-presets.ts` | `SSH_PRESETS`, `SSH_DENIED_COMMANDS` (mirrored in `entrypoint.sh`), `expandSshCommands`, `validateSshCommands`, `docker-host` alias |
+| `src/runners/ssh-backend.ts` | `buildSshBackendSpec` (pure: env, binds, `host.docker.internal:host-gateway`), `prepareSshBackend` (writes client overrides to `~/.heretic/entrypoints/`, stages the key 0644 in `~/.heretic/ssh/run/` (0700) so container uid 1000 can read it), `appendBinds` (dedupes `/entrypoint.sh` with run_as_root) |
+| `src/utils/ssh-host.ts` | pure `ssh setup` helpers: authorized_keys line (`restrict,pty`), known_hosts lines, PATH capture parsing, preset detection |
+| `src/commands/ssh.ts` | `ssh presets`, `ssh setup <profile>`, `ssh check <profile> [--container]` |
+| `assets/entrypoint.sh` | `setup_tool_wrappers`: SSH candidates = listed ∧ not local ∧ not denied ∧ not sidecar; one `ssh-exec --probe` at start-up keeps only host-present commands; also writes the `host-run` (`ssh-exec --run`) and `auto-run` (`ssh-exec --auto`: local when ELF-for-this-CPU / script / local command, else host — Mach-O, PE, foreign ELF) launchers unless `SSH_HOST_RUN=0` |
+
+Key and known_hosts mount to `/etc/heretic/ssh/{key,known_hosts}` (not `~/.ssh`, which Docker
+would create root-owned). `docker-host` defaults `host_cwd` to the project dir and `user` to the
+current user. Tests: `tests/ssh-exec.test.ts` (fake ssh), `tests/ssh-backend.test.ts` (pure),
+`tests/e2e/ssh-e2e.sh` (real sshd + CLI + container; CI job `ssh-e2e`, needs root). Caveats are
+documented in `docs/USER_GUIDE.md` → *SSH backend*.
 
 ### Provider Types
 

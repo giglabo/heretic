@@ -23,6 +23,7 @@ import {
   existsSync,
   readFileSync,
   unlinkSync,
+  statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -114,7 +115,7 @@ runSuite("ssh-exec (simulated SSH tool)", () => {
     expect(existsSync(`${keyPath}.pub`)).toBe(true);
   });
 
-  test("routes to user@host with the remote cd + command", () => {
+  test("refuses a cwd outside the mapped workspace", () => {
     const r = runSshExec(["echo", "hi"], {
       env: {
         SSH_HOST: "remote.example",
@@ -123,9 +124,36 @@ runSuite("ssh-exec (simulated SSH tool)", () => {
         SSH_HOST_CWD: "/srv/ws",
       },
     });
-    expect(r.argv).toContain("builder@remote.example");
-    // The final argument is the remote command: cd <cwd> && <cmd>.
-    expect(r.argv[r.argv.length - 1]).toBe("cd /srv/ws && echo hi");
+    // Outside SSH_WORKSPACE with a host mapping: refuse instead of building the wrong tree.
+    expect(r.argv).toEqual([]);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("outside /workspace");
+  });
+
+  test("maps the workspace (and subdirectories) to SSH_HOST_CWD", () => {
+    const ws = join(root, "ws");
+    const sub = join(ws, "pkg", "a");
+    const host = join(root, "hostws");
+    mkdirSync(sub, { recursive: true });
+    mkdirSync(join(host, "pkg", "a"), { recursive: true });
+    const r = runSshExec(["pwd"], {
+      env: { SSH_HOST: "h", SSH_WORKSPACE: ws, SSH_HOST_CWD: host },
+      cwd: sub,
+    });
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim()).toBe(join(host, "pkg", "a"));
+  });
+
+  test("maps absolute workspace paths in arguments", () => {
+    const ws = join(root, "ws2");
+    const host = join(root, "hostws2");
+    mkdirSync(ws, { recursive: true });
+    mkdirSync(host, { recursive: true });
+    const r = runSshExec(["echo", `${ws}/Cargo.toml`, `--manifest-path=${ws}/x`, "/etc/y"], {
+      env: { SSH_HOST: "h", SSH_WORKSPACE: ws, SSH_HOST_CWD: host },
+      cwd: ws,
+    });
+    expect(r.stdout.trim()).toBe(`${host}/Cargo.toml --manifest-path=${host}/x /etc/y`);
   });
 
   test("passes the port with -p", () => {
@@ -142,11 +170,114 @@ runSuite("ssh-exec (simulated SSH tool)", () => {
     expect(r.argv[i + 1]).toBe("22");
   });
 
-  test("uses hardened ssh options", () => {
+  test("never prompts and fails fast", () => {
     const r = runSshExec(["true"], { env: { SSH_HOST: "h" } });
-    expect(r.argv).toContain("StrictHostKeyChecking=no");
-    expect(r.argv).toContain("UserKnownHostsFile=/dev/null");
+    expect(r.argv).toContain("BatchMode=yes");
+    expect(r.argv).toContain("ConnectTimeout=10");
+    expect(r.argv).toContain("ServerAliveInterval=15");
     expect(r.argv).toContain("LogLevel=ERROR");
+    expect(r.argv).toContain("-T");
+  });
+
+  test("host-key checking is off without known_hosts and strict with it", () => {
+    const off = runSshExec(["true"], { env: { SSH_HOST: "h" } });
+    expect(off.argv).toContain("StrictHostKeyChecking=no");
+    expect(off.argv).toContain("UserKnownHostsFile=/dev/null");
+
+    const kh = join(root, "known_hosts");
+    writeFileSync(kh, "h ssh-ed25519 AAAA\n");
+    const on = runSshExec(["true"], { env: { SSH_HOST: "h", SSH_KNOWN_HOSTS: kh } });
+    expect(on.argv).toContain("StrictHostKeyChecking=yes");
+    expect(on.argv).toContain(`UserKnownHostsFile=${kh}`);
+  });
+
+  test("multiplexes through a private control socket unless disabled", () => {
+    const on = runSshExec(["true"], { env: { SSH_HOST: "h", SSH_RUNTIME_DIR: join(root, "rt") } });
+    expect(on.argv).toContain("ControlMaster=auto");
+    expect(on.argv.some((a) => a.startsWith(`ControlPath=${join(root, "rt")}/cm-`))).toBe(true);
+    const off = runSshExec(["true"], { env: { SSH_HOST: "h", SSH_CONTROL_PERSIST: "0" } });
+    expect(off.argv).not.toContain("ControlMaster=auto");
+  });
+
+  test("exports the captured host PATH and allowlisted env", () => {
+    const r = runSshExec(["printenv", "PATH", "CI", "SECRET"], {
+      env: {
+        SSH_HOST: "h",
+        SSH_HOST_PATH: `/opt/host-tools:${process.env.PATH}`,
+        SSH_ENV_PASSTHROUGH: "CI, BAD-NAME",
+        CI: "it's true",
+        SECRET: "nope",
+      },
+    });
+    const lines = r.stdout.trim().split("\n");
+    expect(lines[0]).toStartWith("/opt/host-tools:");
+    expect(lines[1]).toBe("it's true");
+    // The fake ssh inherits the local env, so assert on the remote script itself.
+    const remote = r.argv[r.argv.length - 1];
+    expect(remote).toContain("CI='it'\\''s true'; export CI;");
+    expect(remote).not.toContain("nope");
+    expect(remote).not.toContain("BAD-NAME");
+  });
+
+  test("routes to user@host:port", () => {
+    const r = runSshExec(["true"], {
+      env: { SSH_HOST: "remote.example", SSH_USER: "builder", SSH_PORT: "2222" },
+    });
+    expect(r.argv).toContain("builder@remote.example");
+  });
+
+  test("runs through the login shell when SSH_LOGIN_SHELL=1", () => {
+    const r = runSshExec(["true"], { env: { SSH_HOST: "h", SSH_LOGIN_SHELL: "1" } });
+    expect(r.argv[r.argv.length - 1]).toStartWith('exec "${SHELL:-/bin/sh}" -lc ');
+  });
+
+  test("--probe prints only the commands present on the host", () => {
+    const r = runSshExec(["--probe", "bash", "definitely-not-a-tool", "x;y"], {
+      env: { SSH_HOST: "h" },
+    });
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim().split("\n")).toEqual(["bash"]);
+  });
+
+  test("--check verifies the remote directory", () => {
+    const ok = runSshExec(["--check"], { env: { SSH_HOST: "h" } });
+    expect(ok.stdout.trim()).toBe("ok");
+    const ws = join(root, "ws3");
+    mkdirSync(ws, { recursive: true });
+    const bad = runSshExec(["--check"], {
+      env: { SSH_HOST: "h", SSH_WORKSPACE: ws, SSH_HOST_CWD: join(root, "missing") },
+      cwd: ws,
+    });
+    expect(bad.code).toBe(3);
+  });
+
+  test("copies a key with loose permissions to a private 0600 file", () => {
+    const loose = join(root, "loose_key");
+    writeFileSync(loose, readFileSync(keyPath));
+    chmodSync(loose, 0o644);
+    const rt = join(root, "rt-key");
+    const r = runSshExec(["true"], {
+      env: { SSH_HOST: "h", SSH_KEY_PATH: loose, SSH_RUNTIME_DIR: rt },
+    });
+    const i = r.argv.indexOf("-i");
+    expect(r.argv[i + 1]).toBe(join(rt, "identity"));
+    expect(statSync(join(rt, "identity")).mode & 0o777).toBe(0o600);
+    expect(r.argv).toContain("IdentitiesOnly=yes");
+  });
+
+  test("refuses an empty key instead of falling back to interactive auth", () => {
+    const empty = join(root, "empty_key");
+    writeFileSync(empty, "");
+    const r = runSshExec(["true"], { env: { SSH_HOST: "h", SSH_KEY_PATH: empty } });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("is empty");
+  });
+
+  test("keeps quotes, globs, $vars and newlines literal on the remote", () => {
+    const r = runSshExec(["printf", "[%s]", "it's", "*", "$HOME", "a\nb", "`id`"], {
+      env: { SSH_HOST: "h" },
+    });
+    expect(r.stdout).toBe("[it's][*][$HOME][a\nb][`id`]");
   });
 
   test("propagates the remote exit code", () => {
@@ -174,9 +305,51 @@ runSuite("ssh-exec (simulated SSH tool)", () => {
     expect(r.argv).not.toContain("-i");
   });
 
-  test("defaults the remote cwd to the current directory", () => {
-    const r = runSshExec(["true"], { env: { SSH_HOST: "h" }, cwd: root });
-    expect(r.argv[r.argv.length - 1]).toBe(`cd ${root} && true`);
+  test("defaults the remote cwd to the current directory (same-path mount)", () => {
+    const r = runSshExec(["pwd"], { env: { SSH_HOST: "h" }, cwd: root });
+    expect(r.stdout.trim()).toBe(root);
+    expect(r.argv[r.argv.length - 1]).toStartWith(`cd '${root}' || exit 1;`);
+  });
+
+  test("--run sends any command to the host", () => {
+    const r = runSshExec(["--run", "uname"], { env: { SSH_HOST: "h" } });
+    expect(r.argv[r.argv.length - 1]).toContain("'uname'");
+  });
+
+  test("--auto runs locally what the container can execute", () => {
+    const script = join(root, "local-script");
+    writeFileSync(script, "#!/bin/sh\necho local-ran\n");
+    chmodSync(script, 0o755);
+    const r = runSshExec(["--auto", script], { env: { SSH_HOST: "h" } });
+    expect(r.stdout.trim()).toBe("local-ran");
+    expect(r.argv).toEqual([]); // ssh was never called
+
+    const viaPath = runSshExec(["--auto", "true"], { env: { SSH_HOST: "h" } });
+    expect(viaPath.code).toBe(0);
+    expect(viaPath.argv).toEqual([]);
+  });
+
+  test("--auto sends Mach-O binaries and missing commands to the host", () => {
+    const macho = join(root, "app-macos");
+    writeFileSync(macho, Buffer.from([0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01]));
+    chmodSync(macho, 0o755);
+    const r = runSshExec(["--auto", macho, "--serve"], { env: { SSH_HOST: "h" } });
+    expect(r.argv[r.argv.length - 1]).toContain(`'${macho}' '--serve'`);
+
+    const missing = runSshExec(["--auto", "no-such-tool-xyz"], { env: { SSH_HOST: "h" } });
+    expect(missing.argv[missing.argv.length - 1]).toContain("'no-such-tool-xyz'");
+  });
+
+  test("--auto sends ELF binaries for another CPU to the host", () => {
+    const foreign = join(root, "app-foreign");
+    const header = Buffer.alloc(20);
+    header.set([0x7f, 0x45, 0x4c, 0x46]);
+    // e_machine: RISC-V (0xf3) — never the CPU running the tests
+    header.set([0xf3, 0x00], 18);
+    writeFileSync(foreign, header);
+    chmodSync(foreign, 0o755);
+    const r = runSshExec(["--auto", foreign], { env: { SSH_HOST: "h" } });
+    expect(r.argv[r.argv.length - 1]).toContain(`'${foreign}'`);
   });
 
   test("fails clearly when SSH_HOST is unset", () => {

@@ -8,6 +8,7 @@ import { runStop } from "./commands/stop";
 import { runAttach } from "./commands/attach";
 import { createAgentsCommand } from "./commands/agents";
 import { createImageCommand } from "./commands/image";
+import { createSshCommand } from "./commands/ssh";
 import { createMnemoniaCommand } from "./commands/mnemoria";
 import { runLocalValidate } from "./commands/local-validate";
 import { runDoctor } from "./commands/doctor";
@@ -134,6 +135,9 @@ export function createProgram(): Command {
 
   // Image build/generate command group
   program.addCommand(createImageCommand());
+
+  // SSH tool-execution backend setup/verification
+  program.addCommand(createSshCommand());
 
   // Mnemoria memory server client command group
   program.addCommand(createMnemoniaCommand());

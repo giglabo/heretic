@@ -354,20 +354,166 @@ heretic-cli image generate --format exec-server        # the Go server source
 wire contract is small — `GET /health`, `GET /info`, `POST /exec` (blocking JSON),
 `POST /exec/stream` (SSE). Point `image:` at it and skip `build-sidecar` entirely.
 
-### SSH backend (alternative)
+### SSH backend (host toolchains)
 
-The SSH backend routes wrapped commands to `ssh user@host "cd <cwd> && <cmd>"`.
-It is configured with a top-level `ssh:` block and needs no builder images:
+The SSH backend runs **listed** toolchain commands that are **missing from the
+container** on another machine — usually the Docker host itself — over SSH.
+
+Resolution order for every wrapped command:
+
+```
+binary in the container  >  build sidecar for its runtime  >  SSH host (only if listed)
+```
+
+The container always wins: a command installed in the image is never routed.
+The agent CLI needs Node, so `node`/`npm` normally run in the container even
+with the `node` preset; the preset then only routes what the image lacks
+(`pnpm`, `yarn`, `bun`, …).
+
+#### Quick start: tools on your own machine (Linux / macOS)
+
+```bash
+heretic-cli ssh setup claude            # key, authorized_keys, host key, PATH, presets
+heretic-cli ssh check claude            # verify from the host
+heretic-cli ssh check claude --container  # verify from a real container (host-gateway)
+heretic-cli run claude
+```
+
+`ssh setup <profile>` does everything once and writes the `ssh:` block:
+
+1. generates `~/.heretic/ssh/<profile>_ed25519` (no passphrase — a container cannot answer a prompt);
+2. authorizes it in `~/.ssh/authorized_keys` as `restrict,pty <key> heretic-<profile>`
+   (no port/agent/X11 forwarding; `--from <cidr>` adds a source restriction);
+   for a remote `--host` it runs `ssh-copy-id` instead;
+3. pins the host keys (`/etc/ssh/ssh_host_*.pub`, or `ssh-keyscan` for a remote host —
+   trust on first use) in `~/.heretic/ssh/<profile>_known_hosts` → strict host-key checking;
+4. logs in and captures the PATH of your **interactive login shell**, so `nvm`, `rustup`,
+   `pyenv`, Homebrew are found even though SSH runs a non-interactive shell;
+5. detects which presets have commands on the host and enables them
+   (`container` and `vcs` are never auto-enabled).
+
+Prerequisites: sshd running and reachable from containers.
+macOS — System Settings → General → Sharing → **Remote Login**.
+Linux — `sudo apt install openssh-server && sudo systemctl enable --now ssh`; sshd must
+listen on the Docker bridge (not only `127.0.0.1`) and the firewall must allow the bridge
+subnet. Windows hosts are **not supported** (cmd/PowerShell remote shell, unmappable paths);
+use WSL or a Linux/macOS build host.
+
+#### Profile reference: `ssh`
 
 ```yaml
 ssh:
-  host: build-host.internal
+  host: docker-host                 # docker-host = host.docker.internal (+ host-gateway on Linux)
   port: 22
-  user: builder
-  key_path: /home/me/.ssh/id_build   # absolute path; mounted read-only
-  host_cwd: /srv/workspace           # working dir on the remote
+  user: me                          # default: your user for docker-host, "agent" otherwise
+  key_path: /home/me/.heretic/ssh/claude_ed25519   # absolute; mounted read-only
+  known_hosts: /home/me/.heretic/ssh/claude_known_hosts  # enables strict host-key checking
+  host_cwd: /srv/projects/app       # default for docker-host: the project directory
+  presets: [rust, node]             # default: node, python, java, go, rust
+  commands: [protoc]                # extra commands
+  host_path: /home/me/.cargo/bin:/usr/bin:/bin   # set by ssh setup; skips the login shell
+  login_shell: true                 # default: true unless host_path is set
+  env_passthrough: [CI, NODE_ENV]   # container env vars forwarded to host commands
+  connect_timeout: 10
+  control_persist: 60               # shared connection lifetime, 0 = one connection per command
+  max_sessions: 8                   # concurrent commands on the shared connection (< sshd MaxSessions 10)
+  probe: true                       # at start-up, route only commands the host actually has
+  tty: false                        # true = -tt (stderr merged into stdout)
+  mount_client: true                # mount the CLI's ssh-exec + entrypoint over the image's
+  host_run: true                    # install the host-run / auto-run launchers
 ```
 
-The defining caveat: unless the remote path is the *same* filesystem the agent
-edits, the build runs against a different tree than the one you're changing. Use
-it when the remote host already has the toolchain you want.
+| Preset | Commands |
+|--------|----------|
+| `node` | npm npx pnpm yarn node corepack bun |
+| `python` | python python3 pip pip3 poetry pytest ruff black mypy uv |
+| `java` | java javac mvn gradle |
+| `go` | go gofmt |
+| `rust` | cargo rustc rustfmt rustup clippy cargo-clippy |
+| `dotnet` | dotnet msbuild nuget |
+| `apple` | xcrun xcodebuild swift swiftc pod xcode-select |
+| `build` | make cmake ninja just bazel |
+| `container` | docker docker-compose kubectl helm — **root-equivalent on the host** |
+| `vcs` | git gh |
+
+`heretic-cli ssh presets` prints the same list. Never routed, whatever the profile says:
+shells, `ssh`/`scp`, `sudo`/`su`, `env`, `timeout`, the agent CLIs.
+
+#### How a call runs
+
+`cargo build` in `/workspace/crates/core` becomes, on the host,
+`cd <project>/crates/core && cargo build`: the working directory and absolute
+`/workspace/...` arguments (`--manifest-path=/workspace/x`) are translated to the host
+path. A command run **outside** the workspace fails (exit 2) instead of building the
+wrong tree. The client (`/opt/sidecar/ssh-exec`) uses `BatchMode` (never prompts),
+`ConnectTimeout`, keep-alives, one shared multiplexed connection (~5 ms per call instead
+of a full handshake) capped at `max_sessions`, and POSIX quoting (bash, zsh, dash, sh).
+On TERM/INT/HUP it kills the remote process tree, so an interrupted build does not keep
+running on the host.
+
+Exit codes: the remote command's code; `255` = SSH transport failure (or the command
+itself exited 255); `2` = local configuration error (cwd outside workspace, unreadable
+or empty key).
+
+#### Running what the host built: `host-run` and `auto-run`
+
+A host-side `cargo build` / `go build` / `swift build` produces a **host** binary
+(Mach-O on macOS) that the Linux container cannot execute. Two launchers are installed
+in the container whenever the SSH backend is on (`host_run: false` disables them):
+
+| Launcher | Runs |
+|----------|------|
+| `host-run <cmd> [args]` | always on the host — any command or file, not limited to presets |
+| `auto-run <cmd> [args]` | in the container if it can execute it (local command, `#!` script, ELF for the container's CPU); otherwise on the host (Mach-O, PE, foreign-arch ELF, command missing locally) |
+
+```bash
+cargo build --release                       # routed to the host (rust preset)
+auto-run ./target/release/app --port 8080   # Mach-O → host; Linux ELF → container
+host-run ./scripts/sign-and-notarize.sh     # force the host
+host-run xcrun simctl list                  # one-off host command without a preset
+```
+
+Paths work as for wrapped commands (workspace cwd and `/workspace/...` arguments are
+mapped). A server started this way listens on the **host**: reach it from the container at
+`host.docker.internal:<port>`. Shell built-ins and pipelines need `host-run sh -c '…'`.
+
+#### Caveats — read before enabling
+
+- **No sandbox for routed commands.** `npm install`/`npm run`, `cargo build` (build.rs,
+  proc-macros), `make`, git hooks execute code from the repository — code the agent can
+  write — **on the host, as the SSH user**, with that user's credentials (`~/.npmrc`,
+  `~/.cargo`, `~/.aws`, `~/.ssh`). The private key is also readable inside the container.
+  Use a dedicated low-privilege host user for untrusted work.
+- **One tree, two operating systems.** On a macOS host, `node_modules`, `target/` and
+  `.venv` built by the host contain macOS binaries; anything in the container that loads
+  them fails (`exec format error`). Keep each ecosystem on **one** side: either install
+  the toolchain in the image or leave it out so every command of that ecosystem routes.
+  On Linux hosts glibc differences can still break native modules.
+- **Ownership (Linux).** Files created by host builds belong to the host user's uid; if
+  that is not 1000 the container's `agent` user cannot modify them.
+- **macOS privacy.** sshd cannot access `~/Documents`, `~/Desktop`, `~/Downloads` unless
+  `sshd-keygen-wrapper` has Full Disk Access; the login keychain is locked in SSH sessions
+  (code signing fails).
+- **Ports.** A dev server started over SSH listens on the host: reach it from the container
+  at `host.docker.internal:<port>`, not `localhost`.
+- **`kill -9`** of a wrapper cannot be trapped — that remote build keeps running.
+- **`tty: true`** gives interactive tools a terminal but merges stderr into stdout.
+- **Remote build host (not the Docker host):** nothing syncs files; `host_cwd` must hold
+  the same tree the agent edits.
+- **Login shell:** `fish`/`csh` as the host user's login shell are not supported (quoting).
+
+#### Where things live
+
+| Host | Container |
+|------|-----------|
+| `ssh.key_path` (copied to `~/.heretic/ssh/run/<profile>.key`, dir 0700) | `/etc/heretic/ssh/key` (re-copied 0600 by ssh-exec) |
+| `ssh.known_hosts` | `/etc/heretic/ssh/known_hosts` |
+| `~/.heretic/entrypoints/ssh-exec`, `entrypoint.sh` | `/opt/sidecar/ssh-exec`, `/entrypoint.sh` |
+
+Injected variables: `SSH_HOST SSH_PORT SSH_USER SSH_KEY_PATH SSH_KNOWN_HOSTS SSH_WORKSPACE
+SSH_HOST_CWD SSH_COMMANDS SSH_HOST_PATH SSH_LOGIN_SHELL SSH_ENV_PASSTHROUGH
+SSH_CONNECT_TIMEOUT SSH_CONTROL_PERSIST SSH_MAX_SESSIONS SSH_PROBE SSH_TTY SSH_HOST_RUN`.
+
+Debug inside the container: `ls /opt/sidecar/wrappers`, `/opt/sidecar/ssh-exec --check`,
+`/opt/sidecar/ssh-exec --probe cargo npm`.
+

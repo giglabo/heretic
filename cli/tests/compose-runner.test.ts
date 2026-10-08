@@ -454,9 +454,48 @@ describe("ComposeRunner SSH backend", () => {
     expect(agent.environment.SSH_HOST).toBe("build-host.internal");
     expect(agent.environment.SSH_PORT).toBe("2222");
     expect(agent.environment.SSH_USER).toBe("builder");
-    expect(agent.environment.SSH_KEY_PATH).toBe("/home/me/.ssh/id_build");
+    // The key is mounted outside ~/.ssh and SSH_KEY_PATH names the container path.
+    expect(agent.environment.SSH_KEY_PATH).toBe("/etc/heretic/ssh/key");
     expect(agent.environment.SSH_HOST_CWD).toBe("/srv/workspace");
-    expect(agent.volumes).toContain("/home/me/.ssh/id_build:/home/agent/.ssh/id_rsa:ro");
+    expect(agent.environment.SSH_WORKSPACE).toBe("/workspace");
+    expect(agent.volumes).toContain("/home/me/.ssh/id_build:/etc/heretic/ssh/key:ro");
+    // Current client + entrypoint are mounted over the image's copies.
+    expect(agent.volumes.some((v: string) => v.endsWith(":/opt/sidecar/ssh-exec:ro"))).toBe(true);
+    expect(agent.volumes.some((v: string) => v.endsWith(":/entrypoint.sh:ro"))).toBe(true);
+    expect(agent.extra_hosts).toBeUndefined();
+  });
+
+  test("docker-host maps to host.docker.internal with host-gateway and the project dir", () => {
+    const spec = gen({
+      ...baseConfig(),
+      volumes: [{ source: projectDir, target: "/workspace", readonly: false }],
+      ssh: { host: "docker-host", user: "me", presets: ["rust", "node"] },
+    });
+    const agent = spec.services.agent;
+    expect(agent.environment.SSH_HOST).toBe("host.docker.internal");
+    expect(agent.environment.SSH_HOST_CWD).toBe(projectDir);
+    expect(agent.environment.SSH_LOGIN_SHELL).toBe("1");
+    expect(agent.environment.SSH_COMMANDS.split(" ")).toContain("cargo");
+    expect(agent.environment.SSH_COMMANDS.split(" ")).toContain("npm");
+    expect(agent.extra_hosts).toEqual(["host.docker.internal:host-gateway"]);
+  });
+
+  test("run_as_root and ssh do not mount /entrypoint.sh twice", () => {
+    const spec = gen({
+      ...baseConfig(),
+      extra: { run_as_root: true },
+      ssh: { host: "h" },
+    });
+    const entrypoints = spec.services.agent.volumes.filter((v: string) =>
+      v.endsWith(":/entrypoint.sh:ro")
+    );
+    expect(entrypoints).toHaveLength(1);
+  });
+
+  test("mount_client: false keeps the image's ssh-exec", () => {
+    const spec = gen({ ...baseConfig(), ssh: { host: "h", mount_client: false } });
+    const volumes: string[] = spec.services.agent.volumes || [];
+    expect(volumes.some((v) => v.includes("/opt/sidecar/ssh-exec"))).toBe(false);
   });
 
   test("defaults port to 22 and user to agent, no key bind without key_path", () => {
@@ -465,7 +504,7 @@ describe("ComposeRunner SSH backend", () => {
     expect(agent.environment.SSH_HOST).toBe("h");
     expect(agent.environment.SSH_PORT).toBe("22");
     expect(agent.environment.SSH_USER).toBe("agent");
-    const keyBind = (agent.volumes || []).find((v: string) => v.includes("id_rsa"));
+    const keyBind = (agent.volumes || []).find((v: string) => v.includes("/etc/heretic/ssh/key"));
     expect(keyBind).toBeUndefined();
   });
 });

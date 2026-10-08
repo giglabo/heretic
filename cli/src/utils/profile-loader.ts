@@ -316,8 +316,29 @@ export function validateProfileDetailed(profile: unknown): ValidationResult {
       if (ssh.key_path !== undefined && typeof ssh.key_path !== "string") {
         errors.push("Profile field 'ssh.key_path' must be a string");
       }
-      if (ssh.host_cwd !== undefined && typeof ssh.host_cwd !== "string") {
-        errors.push("Profile field 'ssh.host_cwd' must be a string");
+      for (const field of ["host_cwd", "known_hosts", "host_path"]) {
+        if (ssh[field] !== undefined && typeof ssh[field] !== "string") {
+          errors.push(`Profile field 'ssh.${field}' must be a string`);
+        }
+      }
+      for (const field of ["presets", "commands", "env_passthrough"]) {
+        const value = ssh[field];
+        if (
+          value !== undefined &&
+          (!Array.isArray(value) || value.some((v) => typeof v !== "string"))
+        ) {
+          errors.push(`Profile field 'ssh.${field}' must be an array of strings`);
+        }
+      }
+      for (const field of ["connect_timeout", "control_persist", "max_sessions"]) {
+        if (ssh[field] !== undefined && typeof ssh[field] !== "number") {
+          errors.push(`Profile field 'ssh.${field}' must be a number`);
+        }
+      }
+      for (const field of ["login_shell", "probe", "tty", "mount_client", "host_run"]) {
+        if (ssh[field] !== undefined && typeof ssh[field] !== "boolean") {
+          errors.push(`Profile field 'ssh.${field}' must be a boolean`);
+        }
       }
     }
   }

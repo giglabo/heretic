@@ -9,4 +9,5 @@ export { createAgentsCommand } from "./agents";
 export { runLocalValidate } from "./local-validate";
 export { runDoctor } from "./doctor";
 export { createImageCommand } from "./image";
+export { createSshCommand } from "./ssh";
 export { createMnemoniaCommand } from "./mnemoria";

@@ -90,20 +90,60 @@ export interface ComposeConfig {
   volumes?: Record<string, unknown>;
 }
 
+/** Named command sets routed by the SSH backend (see utils/ssh-presets.ts). */
+export type SshPreset =
+  | "node"
+  | "python"
+  | "java"
+  | "go"
+  | "rust"
+  | "dotnet"
+  | "apple"
+  | "build"
+  | "container"
+  | "vcs";
+
 /**
- * SSH backend configuration for remote agent execution
+ * SSH backend configuration: listed toolchain commands that are missing from
+ * the container run on this host instead (the container always wins).
  */
 export interface SshConfig {
-  /** SSH host to connect to */
+  /** SSH host; `docker-host` = the machine running Docker (host.docker.internal) */
   host: string;
   /** SSH port (default: 22) */
   port?: number;
-  /** SSH user (default: "agent") */
+  /** SSH user (default: current user for docker-host, otherwise "agent") */
   user?: string;
-  /** Path to SSH private key (default: ~/.ssh/id_rsa) */
+  /** Absolute host path of the private key (mounted read-only) */
   key_path?: string;
-  /** Working directory on the remote host */
+  /** Absolute host path of a known_hosts file; enables strict host-key checking */
+  known_hosts?: string;
+  /** Host directory matching the container workspace (default: project dir for docker-host) */
   host_cwd?: string;
+  /** Command presets to route (default: node, python, java, go, rust) */
+  presets?: SshPreset[];
+  /** Extra command names to route */
+  commands?: string[];
+  /** PATH exported on the host before each command (captured by `ssh setup`) */
+  host_path?: string;
+  /** Run commands through the host user's login shell (default: true unless host_path is set) */
+  login_shell?: boolean;
+  /** Container env var names forwarded to host commands */
+  env_passthrough?: string[];
+  /** SSH connect timeout in seconds (default: 10) */
+  connect_timeout?: number;
+  /** Seconds to keep the shared connection open, 0 = no multiplexing (default: 60) */
+  control_persist?: number;
+  /** Max concurrent commands over the shared connection (default: 8) */
+  max_sessions?: number;
+  /** Ask the host at start-up which listed commands exist (default: true) */
+  probe?: boolean;
+  /** Force a remote TTY (-tt); merges stderr into stdout (default: false) */
+  tty?: boolean;
+  /** Mount the CLI's current ssh-exec + entrypoint over the image's (default: true) */
+  mount_client?: boolean;
+  /** Install the `host-run` / `auto-run` launchers in the container (default: true) */
+  host_run?: boolean;
 }
 
 /**
