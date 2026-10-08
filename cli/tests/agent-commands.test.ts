@@ -59,6 +59,9 @@ describe("Agent Commands Integration", () => {
   });
 
   afterEach(() => {
+    // run-agent reports failures via process.exitCode; don't let a test that
+    // expects a refusal fail the whole `bun test` run.
+    process.exitCode = 0;
     resolveConfigSpy.mockRestore();
     listContainersSpy.mockRestore();
     stopContainerSpy.mockRestore();
