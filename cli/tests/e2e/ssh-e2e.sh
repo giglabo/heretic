@@ -175,7 +175,8 @@ if [[ -n "$CLI" ]]; then
     echo "$out" | sed 's/^/    /'
     expect_eq "ssh setup exit code" "0" "$rc"
     expect_eq "generated key is private" "600" "$(stat -c %a "$HOME_DIR/.heretic/ssh/e2e_ed25519")"
-    grep -q "host_path: .*\.nvm/bin" "$HOME_DIR/.heretic/agents/e2e.yaml" \
+    # host_path can be long; YAML may fold it over several lines
+    grep -q "\.nvm/bin" "$HOME_DIR/.heretic/agents/e2e.yaml" \
         && pass "interactive login PATH captured (nvm-style .bashrc)" || fail "host_path not captured"
     grep -q "known_hosts:" "$HOME_DIR/.heretic/agents/e2e.yaml" && pass "host key pinned" || fail "no known_hosts"
     out=$(as_user "$LAB/heretic-cli ssh setup e2e --port $PORT --presets rust,node" 2>&1)
@@ -217,7 +218,13 @@ EOF
         --entrypoint /bin/bash "$IMG" -c \
         'source <(sed -n "/^setup_tool_wrappers() {/,/^}/p" /entrypoint.sh); setup_tool_wrappers >/dev/null; ls /opt/sidecar/wrappers | tr "\n" " "; echo; cargo build --release; host-run whoami; auto-run cargo --version' 2>&1)
     echo "$WS_OUT" | sed 's/^/    /'
-    echo "$WS_OUT" | grep -q "^auto-run cargo host-run npm $" && pass "entrypoint wrapped the host's commands + launchers" || fail "unexpected wrapper set"
+    wrappers=" $(echo "$WS_OUT" | head -1) "
+    if [[ "$wrappers" == *" auto-run "* && "$wrappers" == *" host-run "* && "$wrappers" == *" cargo "* \
+        && "$wrappers" == *" npm "* && "$wrappers" != *" bash "* && "$wrappers" != *" ssh "* ]]; then
+        pass "entrypoint wrapped host commands + launchers, never bash/ssh"
+    else
+        fail "unexpected wrapper set:$wrappers"
+    fi
     echo "$WS_OUT" | grep -qx "$E2E_USER" && pass "host-run from the container runs as the host user" || fail "host-run failed"
     echo "$WS_OUT" | grep -q "cargo-host --version" && pass "auto-run routes a command missing in the container" || fail "auto-run failed"
     echo "$WS_OUT" | grep -q "cargo-host build --release (cwd=$HOME_DIR/proj/crates/core)" \

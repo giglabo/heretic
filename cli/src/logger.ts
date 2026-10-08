@@ -13,8 +13,11 @@ let logger: pino.Logger;
  * Check if running from a compiled Bun binary
  */
 function isCompiledBinary(): boolean {
-  // Bun compiled binaries run from /$bunfs/ virtual filesystem
-  return process.argv[0]?.includes("$bunfs") || process.argv[1]?.includes("$bunfs");
+  // Bun compiled binaries run from a virtual filesystem: /$bunfs/ on Unix,
+  // B:/~BUN/ on Windows
+  return [process.argv[0], process.argv[1]].some(
+    (arg) => arg?.includes("$bunfs") || arg?.includes("~BUN")
+  );
 }
 
 /**

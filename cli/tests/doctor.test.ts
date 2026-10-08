@@ -26,6 +26,9 @@ describe("Doctor Command", () => {
   let existsSyncSpy: ReturnType<typeof spyOn>;
   let mkdirSyncSpy: ReturnType<typeof spyOn>;
   let exitSpy: ReturnType<typeof spyOn>;
+  // Restored after each test: a leftover fetch mock (with its recorded calls)
+  // is picked up by later `spyOn(globalThis, "fetch")` in other files.
+  const originalFetch = global.fetch;
 
   beforeEach(() => {
     // Use test path provider so doctor.ts resolves paths via the provider
@@ -98,6 +101,7 @@ describe("Doctor Command", () => {
     existsSyncSpy.mockRestore();
     mkdirSyncSpy.mockRestore();
     exitSpy.mockRestore();
+    global.fetch = originalFetch;
     resetPathProvider();
   });
 
