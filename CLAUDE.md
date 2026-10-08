@@ -53,6 +53,15 @@ bun run build            # Build native executable for current platform
 bun run build:all        # Cross-platform builds (linux/macos/windows)
 ```
 
+Repository scripts (from the repo root; details in `docs/DEVELOPMENT.md`):
+
+```bash
+scripts/build.sh [all|linux|macos|<target>]   # native binaries + SHA256SUMS → cli/dist/
+scripts/test.sh [--e2e|--docker-host]         # what CI runs; --e2e needs sudo (Linux)
+scripts/test-ssh-docker-host.sh               # Linux container → this machine (macOS/Linux) over SSH
+scripts/release.sh <version> [--push]         # bump, tag v<version>; the tag runs release.yml
+```
+
 ## Architecture
 
 The CLI lives entirely in `cli/`. Entry point is `src/index.ts` which checks for pending updates, then delegates to `src/cli.ts` (Commander.js routing).

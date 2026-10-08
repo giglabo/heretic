@@ -32,6 +32,122 @@ bun run format           # Prettier format
 bun run build            # Build native executable
 ```
 
+Repository scripts (run from anywhere): `scripts/build.sh`, `scripts/test.sh`,
+`scripts/test-ssh-docker-host.sh`, `scripts/release.sh` — see below.
+
+## Building
+
+`heretic-cli` ships as a single native binary per platform, compiled with
+`bun build --compile`. Cross-compiling works from any OS — bun downloads the
+target runtime.
+
+```bash
+scripts/build.sh                 # this machine → cli/dist/heretic-cli
+scripts/build.sh linux macos     # linux-x64, linux-arm64, macos-x64, macos-arm64
+scripts/build.sh all             # + windows-x64
+scripts/build.sh macos-arm64     # a single target
+```
+
+Outputs land in `cli/dist/` with the release asset names and a `SHA256SUMS`:
+
+| Target | File |
+|--------|------|
+| Linux x64 / arm64 | `heretic-cli-linux-x64`, `heretic-cli-linux-arm64` |
+| macOS Intel / Apple Silicon | `heretic-cli-macos-x64`, `heretic-cli-macos-arm64` |
+| Windows x64 | `heretic-cli-windows.exe` |
+
+Keep these names: `heretic-cli update` downloads the asset by exact name.
+Static assets (`entrypoint.sh`, `ssh-exec`, `sidecar-exec`, the Go exec-server
+source) are embedded at build time — a change to any of them needs a rebuild.
+
+If the checkout lives on a filesystem where bun's final rename fails (some VM
+shares: `EXDEV`/`ENOENT` on `.bun-build`), set `BUILD_CWD` to a local directory:
+`BUILD_CWD=/tmp scripts/build.sh`.
+
+`bun run bundle` builds the npm package (`dist/heretic-cli.js`, needs Bun at runtime).
+
+## Testing
+
+| Layer | Command | Runs where | Covers |
+|-------|---------|------------|--------|
+| Static + unit | `scripts/test.sh` | any OS | format, lint, ~590 `bun test` tests (runners, config, ssh-exec against a fake `ssh`) |
+| SSH e2e | `scripts/test.sh --e2e` | Linux, sudo | private sshd + throw-away user: path mapping, quoting, exit codes, host keys, key modes, 40 parallel calls, orphan kill, `ssh setup`/`check` |
+| Docker-host | `scripts/test.sh --docker-host [--port N]` | Linux or **macOS**, Docker | the real thing as you: Linux container → this machine over SSH (below) |
+
+### Linux container against a Mac (or Linux) host
+
+`scripts/test-ssh-docker-host.sh` reproduces what a user does on their own machine:
+
+```bash
+scripts/build.sh
+scripts/test-ssh-docker-host.sh                 # sshd on :22, Docker running
+scripts/test-ssh-docker-host.sh --no-container  # host side only (no Docker)
+scripts/test-ssh-docker-host.sh --port 2222 --keep
+```
+
+1. creates a throw-away profile and a small C project under `~/.heretic/e2e/`
+2. `heretic-cli ssh setup` — key, `authorized_keys` line, pinned host key, PATH, presets
+3. `heretic-cli ssh check`
+4. host side: the embedded `ssh-exec` builds the project with the host's `make`/`cc`,
+   checks the binary format (**Mach-O on macOS**), and that `auto-run`/`host-run` route it
+   to the host; interrupt cleanup; 20 parallel calls
+5. container side: `ssh check --container`, then `heretic-cli ssh exec` runs `make` and
+   `auto-run ./hello` from a **Linux container** — on a Mac it must print `hello from Darwin`
+
+Everything it adds — profile, keys, the `authorized_keys` line, files — is removed at
+exit (`--keep` leaves it for debugging). It is bash 3.2 compatible (macOS `/bin/bash`).
+
+Prerequisites on a Mac: **Remote Login** on (System Settings → General → Sharing) and
+Docker Desktop. On Linux: `openssh-server` listening on the Docker bridge too.
+
+Any profile can be poked the same way by hand:
+
+```bash
+heretic-cli ssh exec <profile> -- uname -s            # Linux (the container)
+heretic-cli ssh exec <profile> -- host-run uname -s   # Darwin (the host)
+```
+
+### What CI runs (`.github/workflows/ci.yml`)
+
+On every push to `main` / `feat/**` and every PR to `main`:
+
+| Job | What |
+|-----|------|
+| `secrets` | gitleaks over the full history |
+| `lint`, `test`, `bundle` | format check, ESLint, `bun test`, npm bundle |
+| `binaries` | cross-compiles all five release binaries (artifacts kept 7 days) |
+| `smoke` | builds and runs the binary on Ubuntu, macOS and Windows |
+| `ssh-e2e` | `tests/e2e/ssh-e2e.sh` incl. a real container reaching the runner via `host-gateway`, then `test-ssh-docker-host.sh` as the regular runner user |
+| `ssh-macos-host` | the host half on a real macOS runner: macOS sshd, zsh, BSD userland, a real Mach-O from `cc` and its routing |
+| `exec-server` | `go vet` + build of the sidecar exec-server |
+
+Hosted macOS runners have no Docker (no nested virtualization) and runners cannot reach
+each other, so the literal *Linux container → Mac host* pairing is not possible on hosted
+CI; it is covered by its two halves (`ssh-e2e` for the container side, `ssh-macos-host`
+for the Mac side) and by running `scripts/test-ssh-docker-host.sh` on a Mac. A self-hosted
+macOS runner with Docker Desktop could run that script unchanged.
+
+## Releasing
+
+```bash
+scripts/release.sh 0.2.0          # tests, builds all targets, bumps cli/package.json, commits, tags v0.2.0
+scripts/release.sh 0.2.0 --push   # ... and pushes branch + tag
+```
+
+The `v*` tag triggers `.github/workflows/release.yml`:
+
+| Job | Result |
+|-----|--------|
+| `verify` | fails unless the tag equals `cli/package.json`'s version |
+| `build-binaries` | the five `heretic-cli-*` binaries (native runners) |
+| `exec-server` | `exec-server-{linux,darwin}-{amd64,arm64}` (static Go) |
+| `publish-release` | GitHub release with every binary + `SHA256SUMS` |
+| `publish-npm` | `@giglabo/heretic-cli` — needs the `NPM_TOKEN` secret; independent of the binaries |
+
+Users upgrade with `heretic-cli update` (downloads `heretic-cli-<os>-<arch>` from the latest
+release and applies it on the next start). Verify a download with
+`sha256sum -c SHA256SUMS --ignore-missing` (`shasum -a 256 -c` on macOS).
+
 ## Secret Scanning
 
 This repo uses [gitleaks](https://github.com/gitleaks/gitleaks) to prevent secrets from being committed.

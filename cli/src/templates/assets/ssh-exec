@@ -22,6 +22,8 @@
 #   SSH_USER             SSH username (default: agent)
 #   SSH_KEY_PATH         Private key inside the container (default: /home/agent/.ssh/id_rsa)
 #   SSH_KNOWN_HOSTS      known_hosts file; when it exists host keys are verified strictly
+#   SSH_HOST_KEY_ALIAS   name to look the host key up under (HostKeyAlias), e.g. when
+#                        connecting by IP to a host pinned as host.docker.internal
 #   SSH_HOST_CWD         Host directory that corresponds to SSH_WORKSPACE
 #   SSH_WORKSPACE        Container workspace root (default: /workspace)
 #   SSH_HOST_PATH        PATH to export on the host (captured by `heretic-cli ssh setup`)
@@ -117,8 +119,10 @@ remote_cwd() {
     return 1
 }
 
-# Private dir for the control socket and a permission-fixed key copy.
-RUNTIME_DIR="${SSH_RUNTIME_DIR:-${TMPDIR:-/tmp}/heretic-ssh-$(id -u)}"
+# Private dir for the control socket and a permission-fixed key copy. Under
+# /tmp, not $TMPDIR: macOS's long $TMPDIR would push the control socket past
+# the 104-byte unix socket path limit.
+RUNTIME_DIR="${SSH_RUNTIME_DIR:-/tmp/heretic-ssh-$(id -u)}"
 mkdir -p "$RUNTIME_DIR" 2>/dev/null && chmod 700 "$RUNTIME_DIR" 2>/dev/null
 
 # Resolve the identity file. A bind-mounted key often has host ownership or
@@ -129,8 +133,9 @@ IDENTITY=""
 if [[ -e "$KEY_PATH" ]]; then
     [[ -r "$KEY_PATH" ]] || die "SSH key $KEY_PATH is not readable by $(id -un) (uid $(id -u)); fix its owner/permissions on the host"
     [[ -s "$KEY_PATH" ]] || die "SSH key $KEY_PATH is empty"
-    mode=$(stat -c '%a' "$KEY_PATH" 2>/dev/null || echo "")
-    owner=$(stat -c '%u' "$KEY_PATH" 2>/dev/null || echo "")
+    # GNU stat (Linux containers) or BSD stat (macOS, when run on a host)
+    mode=$(stat -c '%a' "$KEY_PATH" 2>/dev/null || stat -f '%Lp' "$KEY_PATH" 2>/dev/null || echo "")
+    owner=$(stat -c '%u' "$KEY_PATH" 2>/dev/null || stat -f '%u' "$KEY_PATH" 2>/dev/null || echo "")
     if [[ "$owner" == "$(id -u)" && ( "$mode" == "600" || "$mode" == "400" ) ]]; then
         IDENTITY="$KEY_PATH"
     else
@@ -153,6 +158,9 @@ SSH_OPTS=(
 
 if [[ -n "$KNOWN_HOSTS" && -s "$KNOWN_HOSTS" ]]; then
     SSH_OPTS+=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KNOWN_HOSTS")
+    if [[ -n "${SSH_HOST_KEY_ALIAS:-}" ]]; then
+        SSH_OPTS+=(-o HostKeyAlias="$SSH_HOST_KEY_ALIAS")
+    fi
 else
     SSH_OPTS+=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 fi
@@ -160,6 +168,15 @@ fi
 if [[ -n "$IDENTITY" ]]; then
     SSH_OPTS+=(-i "$IDENTITY" -o IdentitiesOnly=yes)
 fi
+
+if [[ "${SSH_TTY:-}" == "1" ]]; then
+    SSH_OPTS+=(-tt)
+else
+    SSH_OPTS+=(-T)
+fi
+
+# Options without multiplexing: the fallback when no control socket can exist.
+NOMUX_OPTS=("${SSH_OPTS[@]}")
 
 MUX="false"
 if [[ "$CONTROL_PERSIST" != "0" && "$CONTROL_PERSIST" != "no" && -d "$RUNTIME_DIR" ]]; then
@@ -169,12 +186,6 @@ if [[ "$CONTROL_PERSIST" != "0" && "$CONTROL_PERSIST" != "no" && -d "$RUNTIME_DI
         -o ControlPath="$RUNTIME_DIR/cm-%C"
         -o ControlPersist="$CONTROL_PERSIST"
     )
-fi
-
-if [[ "${SSH_TTY:-}" == "1" ]]; then
-    SSH_OPTS+=(-tt)
-else
-    SSH_OPTS+=(-T)
 fi
 
 # Prologue run on the host before the command: PATH + forwarded env.
@@ -207,13 +218,26 @@ wrap_login() {
 # the host's MaxStartups throttling then drops at random.
 ensure_master() {
     [[ "$MUX" == "true" ]] || return 0
-    command -v flock >/dev/null 2>&1 || return 0
-    (
-        flock 9
+    if command -v flock >/dev/null 2>&1; then
+        (
+            flock 9
+            ssh "${SSH_OPTS[@]}" -O check "${USER_NAME}@${HOST}" >/dev/null 2>&1 \
+                || ssh "${SSH_OPTS[@]}" -f -N -o ControlMaster=yes "${USER_NAME}@${HOST}" \
+                    </dev/null >/dev/null 2>&1
+        ) 9>"$RUNTIME_DIR/master.lock"
+    else
+        # no flock (macOS host): best effort, a lost race just means a second connection
         ssh "${SSH_OPTS[@]}" -O check "${USER_NAME}@${HOST}" >/dev/null 2>&1 \
             || ssh "${SSH_OPTS[@]}" -f -N -o ControlMaster=yes "${USER_NAME}@${HOST}" \
                 </dev/null >/dev/null 2>&1
-    ) 9>"$RUNTIME_DIR/master.lock"
+    fi
+    # No master (the directory cannot hold a unix socket — NFS, some VM shares —
+    # or login failed): use one plain connection per command so the real error,
+    # not a mux error, reaches the caller.
+    if ! ssh "${SSH_OPTS[@]}" -O check "${USER_NAME}@${HOST}" >/dev/null 2>&1; then
+        SSH_OPTS=("${NOMUX_OPTS[@]}")
+        MUX="false"
+    fi
     return 0
 }
 
@@ -330,7 +354,12 @@ kill_remote() {
     # shellcheck disable=SC2016  # expanded on the remote host
     script='d() { for c in $(pgrep -P "$1" 2>/dev/null); do d "$c"; done; echo "$1"; }; '
     script+="if [ -f $PIDFILE ]; then r=\$(cat $PIDFILE); kill -TERM \$(d \"\$r\") 2>/dev/null; rm -f $PIDFILE; fi"
-    timeout 10 ssh "${SSH_OPTS[@]}" "${USER_NAME}@${HOST}" "$script" </dev/null >/dev/null 2>&1 || true
+    # `timeout` is absent on macOS; an empty array would also trip bash 3.2's set -u
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 10 ssh "${SSH_OPTS[@]}" "${USER_NAME}@${HOST}" "$script" </dev/null >/dev/null 2>&1 || true
+    else
+        ssh "${SSH_OPTS[@]}" "${USER_NAME}@${HOST}" "$script" </dev/null >/dev/null 2>&1 || true
+    fi
 }
 
 on_signal() {

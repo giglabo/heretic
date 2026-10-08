@@ -138,6 +138,44 @@ jobs:
         run: shellcheck -S warning src/templates/assets/ssh-exec tests/e2e/ssh-e2e.sh
       - name: SSH e2e (host + CLI + container)
         run: sudo env E2E_CONTAINER=1 E2E_LISTEN=0.0.0.0 HERETIC_CLI="$PWD/dist/heretic-cli" bash tests/e2e/ssh-e2e.sh
+      - name: Start sshd for the runner user
+        run: |
+          sudo ssh-keygen -A
+          printf '%s\n' 'Port 2222' 'ListenAddress 0.0.0.0' 'UsePAM yes' \
+            'PasswordAuthentication no' 'KbdInteractiveAuthentication no' \
+            'HostKey /etc/ssh/ssh_host_ed25519_key' 'HostKey /etc/ssh/ssh_host_ecdsa_key' \
+            'HostKey /etc/ssh/ssh_host_rsa_key' 'PidFile /tmp/sshd-2222.pid' > /tmp/sshd-2222.conf
+          sudo mkdir -p /run/sshd && sudo /usr/sbin/sshd -f /tmp/sshd-2222.conf
+      - name: Docker-host test as a regular user (Linux container → this runner)
+        run: ../scripts/test-ssh-docker-host.sh --cli "$PWD/dist/heretic-cli" --port 2222
+
+  # The macOS side of "Linux container → Mac host": hosted macOS runners have no
+  # Docker (no nested virtualization), so this drives the host side natively —
+  # macOS sshd, zsh login shell, BSD userland, a real Mach-O from `cc` and its
+  # auto-run routing. The container half is the same code as ssh-e2e; the full
+  # pairing runs locally with scripts/test-ssh-docker-host.sh on a Mac.
+  ssh-macos-host:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun build ./src/index.ts --compile --outfile dist/heretic-cli
+      - name: Start sshd for the runner user
+        run: |
+          sudo ssh-keygen -A
+          printf '%s\n' 'Port 2222' 'ListenAddress 127.0.0.1' 'UsePAM yes' \
+            'PasswordAuthentication no' 'KbdInteractiveAuthentication no' \
+            'HostKey /etc/ssh/ssh_host_ed25519_key' 'HostKey /etc/ssh/ssh_host_ecdsa_key' \
+            'HostKey /etc/ssh/ssh_host_rsa_key' 'PidFile /tmp/sshd-2222.pid' > /tmp/sshd-2222.conf
+          sudo /usr/sbin/sshd -f /tmp/sshd-2222.conf
+      - name: Docker-host test, host side (macOS)
+        run: ../scripts/test-ssh-docker-host.sh --cli "$PWD/dist/heretic-cli" --port 2222 --no-container
 
   exec-server:
     runs-on: ubuntu-latest

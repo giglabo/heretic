@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   publish-npm:
+    needs: verify
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -32,8 +33,22 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+  # The tag must match cli/package.json, which is what `--version` and
+  # `heretic-cli update` compare against.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches package.json version
+        run: |
+          pkg=$(jq -r .version cli/package.json)
+          if [[ "v$pkg" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match cli/package.json version $pkg"
+            exit 1
+          fi
+
   build-binaries:
-    needs: publish-npm
+    needs: verify
     strategy:
       matrix:
         include:

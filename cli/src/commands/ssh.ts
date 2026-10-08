@@ -22,8 +22,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { join } from "node:path";
-import type { SshConfig, SshPreset } from "../types/agent-profile";
+import { isAbsolute, join, relative, sep } from "node:path";
+import type { ResolvedAgentConfig, SshConfig, SshPreset } from "../types/agent-profile";
 import { loadProfile, saveProfile } from "../utils/profile-loader";
 import { resolveConfig } from "../utils/config-resolver";
 import {
@@ -181,9 +181,26 @@ function ensureKey(keyPath: string, comment: string): void {
   logRaw(`  ✓ generated key ${keyPath}`);
 }
 
-/** Append the key to this machine's ~/.ssh/authorized_keys (idempotent). */
+/**
+ * Home directory from the user database (what sshd uses). Bun's
+ * os.userInfo().homedir follows $HOME, so ask the shell's `~user` expansion.
+ */
+function passwdHome(): string {
+  if (process.platform !== "win32") {
+    const res = spawnSync("sh", ["-c", 'eval echo "~$(id -un)"'], { encoding: "utf8" });
+    const home = res.stdout?.trim();
+    if (res.status === 0 && home && home.startsWith("/")) return home;
+  }
+  return homedir();
+}
+
+/**
+ * Append the key to this machine's ~/.ssh/authorized_keys (idempotent). Uses
+ * the passwd home directory — the one sshd reads — not $HOME, which differs
+ * under `sudo -E` and similar.
+ */
 function authorizeLocally(pubKey: string, comment: string, from?: string): void {
-  const dir = join(homedir(), ".ssh");
+  const dir = join(passwdHome(), ".ssh");
   const file = join(dir, "authorized_keys");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
@@ -477,38 +494,76 @@ export async function runSshCheck(profileName: string, options: CheckOptions): P
 
   // Real path: from a throwaway container on the Docker network
   if (options.container) {
-    const files = writeSshClientFiles();
-    const staged =
-      ssh.key_path && existsSync(ssh.key_path) ? stageSshKey(ssh.key_path, config.name) : undefined;
-    const full = buildSshBackendSpec(config, files, staged);
-    if (full) {
-      const args = ["run", "--rm", "--entrypoint", "/opt/sidecar/ssh-exec"];
-      for (const h of full.extraHosts) args.push("--add-host", h);
-      for (const b of full.binds) args.push("-v", b);
-      for (const [k, v] of Object.entries(full.env)) args.push("-e", `${k}=${v}`);
-      const workspace = full.env.SSH_WORKSPACE;
-      args.push(
-        "-v",
-        `${config.projectDir}:${workspace}`,
-        "-w",
-        workspace,
-        config.image,
-        "--check"
+    const run = runInThrowawayContainer(config, ["/opt/sidecar/ssh-exec", "--check"], "pipe");
+    if (run.status === 0) {
+      ok(`container → host works (${config.image})`);
+    } else {
+      bad(
+        `container → host failed (exit ${run.status}): ${(run.stderr || run.error?.message || "").trim()}`
       );
-      logger.debug({ args }, "ssh check --container");
-      const run = spawnSync("docker", args, { encoding: "utf8", timeout: 120_000 });
-      if (run.status === 0) {
-        ok(`container → host works (${config.image})`);
-      } else {
-        bad(
-          `container → host failed (exit ${run.status}): ${(run.stderr || run.error?.message || "").trim()}`
-        );
-      }
     }
   }
 
   logRaw(failed ? "SSH backend: NOT ready" : "SSH backend: ready");
   if (failed) process.exitCode = 1;
+}
+
+/**
+ * Run `command` in a throwaway container of the profile image with the same
+ * SSH wiring `heretic-cli run` applies (env, key, known_hosts, host-gateway,
+ * current ssh-exec + entrypoint), after generating the tool wrappers and the
+ * host-run / auto-run launchers. The working directory follows the caller's
+ * position inside the project.
+ */
+function runInThrowawayContainer(
+  config: ResolvedAgentConfig,
+  command: string[],
+  stdio: "pipe" | "inherit"
+): SpawnSyncReturns<string> {
+  const ssh = config.ssh!;
+  const files = ssh.mount_client === false ? undefined : writeSshClientFiles();
+  const staged =
+    ssh.key_path && existsSync(ssh.key_path) ? stageSshKey(ssh.key_path, config.name) : undefined;
+  const spec = buildSshBackendSpec(config, files, staged)!;
+  const workspace = spec.env.SSH_WORKSPACE;
+  const rel = relative(config.projectDir, process.cwd());
+  const workdir =
+    rel && !rel.startsWith("..") && !isAbsolute(rel)
+      ? `${workspace}/${rel.split(sep).join("/")}`
+      : workspace;
+
+  const prepare =
+    'export PATH="/opt/sidecar/wrappers:$PATH"; ' +
+    'source <(sed -n "/^setup_tool_wrappers() {/,/^}/p" /entrypoint.sh) && setup_tool_wrappers >&2; ' +
+    'exec "$@"';
+  const args = ["run", "--rm", "--entrypoint", "/bin/bash"];
+  if (stdio === "inherit" && process.stdin.isTTY) args.push("-it");
+  for (const h of spec.extraHosts) args.push("--add-host", h);
+  for (const b of spec.binds) args.push("-v", b);
+  for (const [k, v] of Object.entries(spec.env)) args.push("-e", `${k}=${v}`);
+  args.push("-v", `${config.projectDir}:${workspace}`, "-w", workdir, config.image);
+  args.push("-c", prepare, "heretic-ssh-exec", ...command);
+  logger.debug({ args }, "ssh throwaway container");
+  return spawnSync("docker", args, {
+    encoding: "utf8",
+    stdio: stdio === "inherit" ? "inherit" : "pipe",
+    timeout: stdio === "inherit" ? undefined : 120_000,
+  });
+}
+
+export async function runSshExec(profileName: string, command: string[]): Promise<void> {
+  if (command.length === 0) {
+    throw new Error("Nothing to run: heretic-cli ssh exec <profile> -- <command> [args...]");
+  }
+  const config = resolveConfig({ profileName, projectDir: process.cwd() });
+  if (!config.ssh) {
+    throw new Error(
+      `Profile '${profileName}' has no ssh block (run: heretic-cli ssh setup ${profileName})`
+    );
+  }
+  const run = runInThrowawayContainer(config, command, "inherit");
+  if (run.error) throw run.error;
+  process.exitCode = run.status ?? 1;
 }
 
 function runSshPresets(): void {
@@ -556,6 +611,17 @@ export function createSshCommand(): Command {
     .option("--container", "Also test from a throwaway container of the profile image")
     .action(async (profile: string, options: CheckOptions) => {
       await runSshCheck(profile, options);
+    });
+
+  ssh
+    .command("exec")
+    .description(
+      "Run a command in a throwaway container of the profile image with the SSH backend wired (wrappers, host-run, auto-run)"
+    )
+    .argument("<profile>", "Agent profile")
+    .argument("[command...]", "Command to run in the container (put it after --)")
+    .action(async (profile: string, command: string[]) => {
+      await runSshExec(profile, command);
     });
 
   return ssh;

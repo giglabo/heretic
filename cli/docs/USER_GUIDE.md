@@ -376,8 +376,14 @@ with the `node` preset; the preset then only routes what the image lacks
 heretic-cli ssh setup claude            # key, authorized_keys, host key, PATH, presets
 heretic-cli ssh check claude            # verify from the host
 heretic-cli ssh check claude --container  # verify from a real container (host-gateway)
+heretic-cli ssh exec claude -- host-run uname -s   # try any command in a throwaway container
 heretic-cli run claude
 ```
+
+`ssh exec <profile> -- <command>` starts a throwaway container of the profile image with
+exactly the SSH wiring `run` applies (wrappers, `host-run`/`auto-run`, key, host key,
+`host-gateway`, path mapping), runs the command and exits with its code. Run it from inside
+the project; the container's working directory follows yours.
 
 `ssh setup <profile>` does everything once and writes the `ssh:` block:
 
@@ -514,6 +520,11 @@ Injected variables: `SSH_HOST SSH_PORT SSH_USER SSH_KEY_PATH SSH_KNOWN_HOSTS SSH
 SSH_HOST_CWD SSH_COMMANDS SSH_HOST_PATH SSH_LOGIN_SHELL SSH_ENV_PASSTHROUGH
 SSH_CONNECT_TIMEOUT SSH_CONTROL_PERSIST SSH_MAX_SESSIONS SSH_PROBE SSH_TTY SSH_HOST_RUN`.
 
+`ssh-exec` also honours `SSH_HOST_KEY_ALIAS` (look the pinned host key up under another
+name, e.g. when connecting by IP) and `SSH_RUNTIME_DIR` (control-socket directory, default
+`/tmp/heretic-ssh-<uid>`). When no control socket can be created there (NFS, some VM shares)
+it silently falls back to one connection per command.
+
 Debug inside the container: `ls /opt/sidecar/wrappers`, `/opt/sidecar/ssh-exec --check`,
-`/opt/sidecar/ssh-exec --probe cargo npm`.
+`/opt/sidecar/ssh-exec --probe cargo npm` — or from the host, `heretic-cli ssh exec <profile> -- …`.
 

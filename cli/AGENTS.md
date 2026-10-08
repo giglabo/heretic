@@ -339,13 +339,18 @@ presets node/python/java/go/rust). Code map:
 | `src/utils/ssh-presets.ts` | `SSH_PRESETS`, `SSH_DENIED_COMMANDS` (mirrored in `entrypoint.sh`), `expandSshCommands`, `validateSshCommands`, `docker-host` alias |
 | `src/runners/ssh-backend.ts` | `buildSshBackendSpec` (pure: env, binds, `host.docker.internal:host-gateway`), `prepareSshBackend` (writes client overrides to `~/.heretic/entrypoints/`, stages the key 0644 in `~/.heretic/ssh/run/` (0700) so container uid 1000 can read it), `appendBinds` (dedupes `/entrypoint.sh` with run_as_root) |
 | `src/utils/ssh-host.ts` | pure `ssh setup` helpers: authorized_keys line (`restrict,pty`), known_hosts lines, PATH capture parsing, preset detection |
-| `src/commands/ssh.ts` | `ssh presets`, `ssh setup <profile>`, `ssh check <profile> [--container]` |
+| `src/commands/ssh.ts` | `ssh presets`, `ssh setup <profile>`, `ssh check <profile> [--container]`, `ssh exec <profile> -- <cmd>` (throwaway container with the full wiring; `check --container` uses the same path). `authorized_keys` goes to the passwd home (sshd's), not `$HOME` |
 | `assets/entrypoint.sh` | `setup_tool_wrappers`: SSH candidates = listed ∧ not local ∧ not denied ∧ not sidecar; one `ssh-exec --probe` at start-up keeps only host-present commands; also writes the `host-run` (`ssh-exec --run`) and `auto-run` (`ssh-exec --auto`: local when ELF-for-this-CPU / script / local command, else host — Mach-O, PE, foreign ELF) launchers unless `SSH_HOST_RUN=0` |
 
 Key and known_hosts mount to `/etc/heretic/ssh/{key,known_hosts}` (not `~/.ssh`, which Docker
 would create root-owned). `docker-host` defaults `host_cwd` to the project dir and `user` to the
 current user. Tests: `tests/ssh-exec.test.ts` (fake ssh), `tests/ssh-backend.test.ts` (pure),
-`tests/e2e/ssh-e2e.sh` (real sshd + CLI + container; CI job `ssh-e2e`, needs root). Caveats are
+`tests/e2e/ssh-e2e.sh` (real sshd + CLI + container; CI job `ssh-e2e`, needs root),
+`scripts/test-ssh-docker-host.sh` (as the current user, Linux or macOS; CI jobs `ssh-e2e` and
+`ssh-macos-host`). `ssh-exec` must stay bash 3.2 / BSD-userland compatible (it runs on macOS
+hosts in tests): no `declare -A`, no empty `"${arr[@]}"` under `set -u`, `stat -c || stat -f`,
+no hard dependency on `timeout`/`flock`. Build/test/release scripts and the CI matrix are
+documented in `docs/DEVELOPMENT.md`. Caveats are
 documented in `docs/USER_GUIDE.md` → *SSH backend*.
 
 ### Provider Types

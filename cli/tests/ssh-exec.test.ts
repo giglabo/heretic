@@ -55,6 +55,9 @@ runSuite("ssh-exec (simulated SSH tool)", () => {
     // real stdout/stderr and the exit code flow back through `exec ssh`.
     const fakeSsh = [
       "#!/usr/bin/env bash",
+      // Control-socket calls (`-O check`, master `-f -N`) succeed without being
+      // captured, so the capture holds the command's own invocation.
+      'for a in "$@"; do [[ "$a" == "-O" || "$a" == "-N" ]] && exit 0; done',
       'printf "%s\\n" "$@" > "$SSH_CAPTURE"',
       'remote="${!#}"', // last positional argument is the remote command
       'exec bash -c "$remote"',
