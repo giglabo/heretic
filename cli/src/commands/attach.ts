@@ -4,24 +4,45 @@ import { isDockerAvailable, listContainers, getDockerClient } from "../utils/doc
 import type { ContainerInfo } from "dockerode";
 
 /**
- * Find container by name or ID prefix
+ * Find the container to attach to, most specific match first:
+ * 1. exact container name;
+ * 2. an agent profile name: that profile's session container in the current
+ *    folder (with -s, that session; without, the only one or 'default');
+ * 3. a container ID prefix (after profiles, so a profile named like hex
+ *    digits can't hit some other container's ID).
+ * No substring matching: `attach claude` must never pick `claude-zai`, nor a
+ * `claude` session of another folder.
  */
-function findContainerByNameOrId(
+export function findContainerByNameOrId(
   nameOrId: string,
-  containers: ContainerInfo[]
+  containers: ContainerInfo[],
+  projectDir: string,
+  session?: string
 ): ContainerInfo | undefined {
-  return containers.find((container) => {
-    // Check if container ID starts with the provided prefix
-    if (container.Id.startsWith(nameOrId)) {
-      return true;
-    }
+  const cleanNames = (c: ContainerInfo): string[] => c.Names.map((n) => n.replace(/^\//, ""));
 
-    // Check if any container name matches (strip leading '/')
-    return container.Names.some((name) => {
-      const cleanName = name.replace(/^\//, "");
-      return cleanName === nameOrId || cleanName.includes(nameOrId);
-    });
-  });
+  const exact = containers.find((c) => cleanNames(c).includes(nameOrId));
+  if (exact) return exact;
+
+  const sessions = containers.filter(
+    (c) =>
+      c.Labels?.["heretic.agent"] === nameOrId &&
+      c.Labels?.["heretic.project"] === projectDir &&
+      c.Labels?.["heretic.role"] !== "build-sidecar"
+  );
+  if (sessions.length === 1) return sessions[0];
+  if (sessions.length > 1) {
+    const wanted = session ?? "default";
+    const match = sessions.find((c) => c.Labels?.["heretic.session"] === wanted);
+    if (match) return match;
+    const names = sessions.map((c) => c.Labels?.["heretic.session"]).join(", ");
+    getLogger().error(
+      `'${nameOrId}' has several sessions in this folder (${names}); pick one with -s`
+    );
+    return undefined;
+  }
+
+  return containers.find((c) => c.Id.startsWith(nameOrId));
 }
 
 /**
@@ -60,7 +81,12 @@ export async function runAttach(name: string, options?: { session?: string }): P
     }
 
     // Find the container by name or ID
-    const containerInfo = findContainerByNameOrId(name, containers);
+    const containerInfo = findContainerByNameOrId(
+      name,
+      containers,
+      process.cwd(),
+      options?.session
+    );
     if (!containerInfo) {
       logger.error({ name }, `Container '${name}' not found`);
       process.exit(1);

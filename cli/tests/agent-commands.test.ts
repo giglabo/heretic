@@ -6,6 +6,7 @@ import { createAgentsCommand } from "../src/commands/agents";
 import * as configResolver from "../src/utils/config-resolver";
 import * as dockerUtils from "../src/utils/docker";
 import * as DockerRunnerModule from "../src/runners/docker-runner";
+import * as containerReuse from "../src/utils/container-reuse";
 import { getAgentContainerName } from "../src/utils/session";
 
 describe("Agent Commands Integration", () => {
@@ -101,43 +102,121 @@ describe("Agent Commands Integration", () => {
         // Expected to throw due to exit
       }
 
-      expect(dockerRunnerStartSpy).toHaveBeenCalledWith({ detach: true });
+      expect(dockerRunnerStartSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ detach: true, recreate: false })
+      );
 
       exitSpy.mockRestore();
     });
 
-    it("refuses to start when the same profile + session is already running here", async () => {
-      const findSpy = spyOn(dockerUtils, "findContainerByName").mockResolvedValue({
+    const sessionName = getAgentContainerName("test-profile", "default", "/test/project");
+    const ownLabels = {
+      "heretic.managed": "true",
+      "heretic.agent": "test-profile",
+      "heretic.project": "/test/project",
+      "heretic.session": "default",
+    };
+    const liveSession = (labels: Record<string, string> = ownLabels): ReturnType<typeof spyOn> =>
+      spyOn(dockerUtils, "findContainerByName").mockResolvedValue({
         Id: "live123",
-        Names: [`/${getAgentContainerName("test-profile", "default", "/test/project")}`],
+        Names: [`/${sessionName}`],
         State: "running",
+        Labels: labels,
       } as any);
-      const previousExitCode = process.exitCode;
+
+    it("attaches to the running session instead of starting another one", async () => {
+      const findSpy = liveSession();
+      const attachSpy = spyOn(containerReuse, "attachToContainer").mockResolvedValue(undefined);
+
+      try {
+        await runAgent("test-profile", {});
+
+        expect(findSpy).toHaveBeenCalledWith(sessionName);
+        expect(attachSpy).toHaveBeenCalledWith("live123");
+        expect(dockerRunnerStartSpy).not.toHaveBeenCalled();
+        expect(process.exitCode).toBe(0);
+      } finally {
+        findSpy.mockRestore();
+        attachSpy.mockRestore();
+      }
+    });
+
+    it("leaves a running session alone with --detach", async () => {
+      const findSpy = liveSession();
+      const attachSpy = spyOn(containerReuse, "attachToContainer").mockResolvedValue(undefined);
 
       try {
         await runAgent("test-profile", { detach: true });
 
-        expect(findSpy).toHaveBeenCalledWith(
-          getAgentContainerName("test-profile", "default", "/test/project")
-        );
+        expect(attachSpy).not.toHaveBeenCalled();
+        expect(dockerRunnerStartSpy).not.toHaveBeenCalled();
+        expect(stopContainerSpy).not.toHaveBeenCalled();
+        expect(process.exitCode).toBe(0);
+      } finally {
+        findSpy.mockRestore();
+        attachSpy.mockRestore();
+      }
+    });
+
+    it("refuses a custom command for a running session", async () => {
+      const findSpy = liveSession();
+
+      try {
+        await runAgent("test-profile", { command: ["npm", "test"] });
+
         expect(dockerRunnerStartSpy).not.toHaveBeenCalled();
         expect(process.exitCode).toBe(1);
       } finally {
-        process.exitCode = previousExitCode;
         findSpy.mockRestore();
       }
     });
 
-    it("starts over a stopped container of the same session", async () => {
+    it("replaces the running session with --recreate", async () => {
+      const findSpy = liveSession();
+
+      try {
+        await runAgent("test-profile", { recreate: true });
+
+        expect(stopContainerSpy).toHaveBeenCalled();
+        expect(removeContainerSpy).toHaveBeenCalledWith("live123", { force: true });
+        expect(dockerRunnerStartSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ recreate: true })
+        );
+      } finally {
+        findSpy.mockRestore();
+      }
+    });
+
+    it("refuses when a running container with that name isn't this session's", async () => {
+      const findSpy = liveSession({ ...ownLabels, "heretic.project": "/other/project" });
+      const attachSpy = spyOn(containerReuse, "attachToContainer").mockResolvedValue(undefined);
+
+      try {
+        await runAgent("test-profile", {});
+
+        expect(attachSpy).not.toHaveBeenCalled();
+        expect(dockerRunnerStartSpy).not.toHaveBeenCalled();
+        expect(process.exitCode).toBe(1);
+      } finally {
+        findSpy.mockRestore();
+        attachSpy.mockRestore();
+      }
+    });
+
+    it("hands a stopped session to the runner, which reuses or recreates it", async () => {
       const findSpy = spyOn(dockerUtils, "findContainerByName").mockResolvedValue({
         Id: "old123",
-        Names: [`/${getAgentContainerName("test-profile", "default", "/test/project")}`],
+        Names: [`/${sessionName}`],
         State: "exited",
+        Labels: ownLabels,
       } as any);
 
       try {
         await runAgent("test-profile", { detach: true });
-        expect(dockerRunnerStartSpy).toHaveBeenCalledWith({ detach: true });
+        expect(removeContainerSpy).not.toHaveBeenCalled();
+        expect(dockerRunnerStartSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ detach: true, recreate: false })
+        );
       } finally {
         findSpy.mockRestore();
       }

@@ -16,9 +16,15 @@ import type {
   SidecarRuntime,
 } from "../types/agent-profile";
 import { dropBusyOptionalPorts, formatPortMappings } from "../utils/ports";
-import { findContainerByName, isContainerActive } from "../utils/docker";
+import {
+  findContainerByName,
+  isContainerActive,
+  removeContainer,
+  stopContainer,
+} from "../utils/docker";
+import { attachToContainer, ownsSessionContainer } from "../utils/container-reuse";
 import { getAgentContainerName } from "../utils/session";
-import { getLogger } from "../logger";
+import { getLogger, logRaw } from "../logger";
 
 /**
  * Run an agent by name with optional CLI overrides
@@ -27,6 +33,7 @@ import { getLogger } from "../logger";
  * @param options - Runtime options
  * @param options.detach - Run container in background (detached mode)
  * @param options.command - Override the default command specified in config
+ * @param options.recreate - Replace this session's container instead of reusing it
  */
 /**
  * Parse --mcp value: if it's a file path that exists, read and parse it;
@@ -91,16 +98,22 @@ async function skipBusyPresetPorts(config: ResolvedAgentConfig): Promise<void> {
 }
 
 /**
- * Refuse to start over a live session. The runners replace any container with
- * the same name, so a second `run` of the same profile + session in the same
- * folder would silently kill the agent already working there.
+ * Deal with a session that is already live in this folder (same profile +
+ * session). By default `run` attaches to it instead of starting another one —
+ * the runners would otherwise replace the same-named container and kill the
+ * agent working there. `--recreate` removes it so a fresh one is created.
  *
- * @returns true when the session is free (or can't be checked — the runner
- *          then reports Docker problems itself), false when it is in use.
+ * @returns "continue" to go on and start the runner (nothing live, or it was
+ *          removed for --recreate), "done" when handled here (attached, or
+ *          already running detached), "error" when refused.
  */
-async function ensureSessionFree(agentName: string, config: ResolvedAgentConfig): Promise<boolean> {
+async function handleLiveSession(
+  agentName: string,
+  config: ResolvedAgentConfig,
+  options: { detach: boolean; command?: string[]; recreate: boolean }
+): Promise<"continue" | "done" | "error"> {
   // The custom runner names containers from the user's compose file.
-  if (config.runner === "custom") return true;
+  if (config.runner === "custom") return "continue";
 
   const logger = getLogger();
   const containerName = getAgentContainerName(config.name, config.sessionName, config.projectDir);
@@ -108,16 +121,54 @@ async function ensureSessionFree(agentName: string, config: ResolvedAgentConfig)
   try {
     existing = await findContainerByName(containerName);
   } catch {
-    return true;
+    return "continue"; // the runner reports Docker problems itself
   }
-  if (!existing || !isContainerActive(existing)) return true;
+  if (!existing || !isContainerActive(existing)) return "continue";
 
-  logger.error(
-    `Agent '${agentName}' is already running in this folder in session '${config.sessionName}' (${containerName}).`
+  if (!ownsSessionContainer(existing.Labels, config)) {
+    logger.error(
+      `Container '${containerName}' is running but belongs to another profile, folder or session.`
+    );
+    logger.info(`Use another session name: heretic-cli run ${agentName} -s <name>`);
+    return "error";
+  }
+
+  if (options.recreate) {
+    logger.warn(
+      `Recreating session '${config.sessionName}' of '${agentName}': stopping the running container ${containerName}`
+    );
+    await stopContainer(existing.Id, { t: 5 }).catch(() => undefined);
+    await removeContainer(existing.Id, { force: true });
+    return "continue";
+  }
+
+  if (options.command) {
+    logger.error(
+      `Agent '${agentName}' is already running in this folder in session '${config.sessionName}'; a custom command needs a new container.`
+    );
+    logger.info(`Run it in another session: heretic-cli run ${agentName} -s <name> ...`);
+    logger.info(`Or replace the running one: heretic-cli run ${agentName} --recreate ...`);
+    return "error";
+  }
+
+  if (options.detach) {
+    logger.info(
+      `Agent '${agentName}' is already running in session '${config.sessionName}' (${containerName}).`
+    );
+    logger.info(`Attach to it: heretic-cli attach ${agentName} -s ${config.sessionName}`);
+    return "done";
+  }
+
+  logger.info(
+    `Attaching to running session '${config.sessionName}' (${containerName}); pass --recreate for a fresh container.`
   );
-  logger.info(`Run another one in a separate session: heretic-cli run ${agentName} -s <name>`);
-  logger.info(`Or attach to it: heretic-cli attach ${agentName} -s ${config.sessionName}`);
-  return false;
+  logRaw(`Attached to ${containerName}. Press Ctrl+P, Ctrl+Q to detach.`);
+  const exitCode = await attachToContainer(existing.Id);
+  if (exitCode !== undefined && exitCode !== 0) {
+    logger.info(`Container exited with code ${exitCode}`);
+    process.exitCode = exitCode;
+  }
+  return "done";
 }
 
 export async function runAgent(
@@ -125,6 +176,7 @@ export async function runAgent(
   options: {
     detach?: boolean;
     command?: string[];
+    recreate?: boolean;
     mcp?: string;
     session?: string;
     asRoot?: boolean;
@@ -142,6 +194,7 @@ export async function runAgent(
   const {
     detach = false,
     command,
+    recreate = false,
     mcp,
     session,
     asRoot,
@@ -233,8 +286,9 @@ export async function runAgent(
       addPortPresets: portPreset,
     });
 
-    if (!(await ensureSessionFree(agentName, resolvedConfig))) {
-      process.exitCode = 1;
+    const live = await handleLiveSession(agentName, resolvedConfig, { detach, command, recreate });
+    if (live !== "continue") {
+      if (live === "error") process.exitCode = 1;
       return;
     }
 
@@ -272,7 +326,7 @@ export async function runAgent(
 
     // Start the container
     logger.info(`Starting agent '${agentName}'...`);
-    const result = await runner.start({ detach, command });
+    const result = await runner.start({ detach, command, recreate });
 
     if (detach) {
       // Detached mode: log container ID and exit

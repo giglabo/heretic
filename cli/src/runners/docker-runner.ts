@@ -7,7 +7,7 @@
  */
 
 import type Docker from "dockerode";
-import type { ContainerCreateOptions } from "dockerode";
+import type { ContainerCreateOptions, ContainerInfo } from "dockerode";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -21,7 +21,13 @@ import {
   stopContainer,
   removeContainer,
   findContainerByName,
+  isContainerActive,
 } from "../utils/docker";
+import {
+  CONFIG_HASH_LABEL,
+  computeConfigHash,
+  ownsSessionContainer,
+} from "../utils/container-reuse";
 import {
   writeMcpFile,
   cleanupMcpFile,
@@ -47,13 +53,18 @@ export class DockerRunner implements Runner {
   private containerId?: string;
   private mcpFilePath?: string;
   private sidecarManager?: SidecarManager;
+  private sidecarsStarted = false;
 
   constructor(private config: ResolvedAgentConfig) {
     this.docker = getDockerClient();
   }
 
-  async start(options?: { detach?: boolean; command?: string[] }): Promise<RunResult> {
-    const { detach = false, command } = options || {};
+  async start(options?: {
+    detach?: boolean;
+    command?: string[];
+    recreate?: boolean;
+  }): Promise<RunResult> {
+    const { detach = false, command, recreate = false } = options || {};
 
     try {
       // Check Docker availability
@@ -63,20 +74,34 @@ export class DockerRunner implements Runner {
       }
 
       // Check if image exists locally, pull if not
-      await this.ensureImage();
+      const imageId = await this.ensureImage();
 
-      // Build sidecars (dockerode-native): create the shared network + builder
-      // containers and wait until each is healthy BEFORE the agent starts — the
-      // parity equivalent of compose's `depends_on: { condition: service_healthy }`.
-      let sidecarWiring: SidecarWiring | undefined;
+      // Build sidecars (dockerode-native): the agent-side wiring is computed up
+      // front so the create options (and their hash) are known before anything
+      // starts; the builders themselves come up right before the agent.
       if (this.config.toolBackends?.sidecars?.length) {
         this.sidecarManager = new SidecarManager(this.config, this.docker);
-        sidecarWiring = await this.sidecarManager.start();
+      }
+      const plannedWiring = this.sidecarManager?.computeWiring();
+
+      const containerOptions = this.translateConfig(command, plannedWiring);
+      const configHash = computeConfigHash(containerOptions);
+      containerOptions.Labels = { ...containerOptions.Labels, [CONFIG_HASH_LABEL]: configHash };
+      const containerName = this.generateContainerName();
+
+      // Reuse this session's stopped container when nothing changed, so what was
+      // installed or changed inside it survives between runs.
+      if (!recreate) {
+        const reusable = await this.findReusableContainer(containerName, configHash, imageId);
+        if (reusable) {
+          const resumed = await this.resumeContainer(reusable, containerName, detach);
+          if (resumed) return resumed;
+        }
       }
 
-      // Create container with translated config
-      const containerOptions = this.translateConfig(command, sidecarWiring);
-      const containerName = this.generateContainerName();
+      // Wait for every builder to be healthy BEFORE the agent starts — the
+      // parity equivalent of compose's `depends_on: { condition: service_healthy }`.
+      await this.startSidecars();
 
       logger.debug({ containerOptions, containerName }, "Creating container");
 
@@ -130,6 +155,7 @@ export class DockerRunner implements Runner {
           logger.debug({ error: sidecarError }, "Failed to clean up build sidecars");
         }
         this.sidecarManager = undefined;
+        this.sidecarsStarted = false;
       }
 
       this.handleError(error);
@@ -165,6 +191,7 @@ export class DockerRunner implements Runner {
       if (this.sidecarManager) {
         await this.sidecarManager.stop();
         this.sidecarManager = undefined;
+        this.sidecarsStarted = false;
       }
 
       this.containerId = undefined;
@@ -252,7 +279,7 @@ export class DockerRunner implements Runner {
   /**
    * Ensure the Docker image is available locally, pull if not
    */
-  private async ensureImage(): Promise<void> {
+  private async ensureImage(): Promise<string | undefined> {
     const imageName = this.config.image;
 
     // Normalize image name for comparison (add :latest if no tag)
@@ -261,7 +288,7 @@ export class DockerRunner implements Runner {
     try {
       // Check if image exists locally
       const images = await this.docker.listImages();
-      const imageExists = images.some((img) => {
+      const local = images.find((img) => {
         if (!img.RepoTags) return false;
         return img.RepoTags.some((tag) => {
           // Check exact match or match with :latest suffix
@@ -269,7 +296,7 @@ export class DockerRunner implements Runner {
         });
       });
 
-      if (!imageExists) {
+      if (!local) {
         logger.info({ image: imageName }, "Image not found locally, pulling...");
 
         await pullImage(
@@ -283,13 +310,98 @@ export class DockerRunner implements Runner {
         );
 
         logger.info({ image: imageName }, "Image pulled successfully");
-      } else {
-        logger.debug({ image: imageName }, "Image exists locally");
+        // The image ID tells a reusable container from one made of an older build
+        return await this.docker
+          .getImage(imageName)
+          .inspect()
+          .then((info) => info.Id)
+          .catch(() => undefined);
       }
+      logger.debug({ image: imageName }, "Image exists locally");
+      return local.Id;
     } catch (error) {
       logger.error({ error, image: imageName }, "Failed to pull image");
       throw new Error(`Failed to pull image ${imageName}: ${error}`);
     }
+  }
+
+  /** Bring up the build sidecars once per run (no-op without sidecars). */
+  private async startSidecars(): Promise<void> {
+    if (this.sidecarManager && !this.sidecarsStarted) {
+      await this.sidecarManager.start();
+      this.sidecarsStarted = true;
+    }
+  }
+
+  /**
+   * This session's stopped container, if it can be started again as is: it is
+   * ours by its labels, was made from the same create options and image.
+   * Anything else is logged and recreated.
+   */
+  private async findReusableContainer(
+    containerName: string,
+    configHash: string,
+    imageId: string | undefined
+  ): Promise<ContainerInfo | undefined> {
+    let existing: ContainerInfo | undefined;
+    try {
+      existing = await findContainerByName(containerName, this.docker);
+    } catch (error) {
+      logger.debug({ error, containerName }, "Failed to look up existing container");
+      return undefined;
+    }
+    if (!existing || isContainerActive(existing)) return undefined;
+
+    if (!ownsSessionContainer(existing.Labels, this.config)) {
+      logger.warn(
+        `Container '${containerName}' belongs to another profile, folder or session; recreating it`
+      );
+      return undefined;
+    }
+    const previousHash = existing.Labels?.[CONFIG_HASH_LABEL];
+    if (!previousHash) {
+      logger.info(`Container '${containerName}' predates container reuse; recreating it`);
+      return undefined;
+    }
+    if (previousHash !== configHash) {
+      logger.warn(
+        `Configuration changed since '${containerName}' was created (profile, local override or flags); recreating it`
+      );
+      return undefined;
+    }
+    if (imageId && existing.ImageID !== imageId) {
+      logger.warn(`Image '${this.config.image}' was updated; recreating '${containerName}'`);
+      return undefined;
+    }
+    return existing;
+  }
+
+  /**
+   * Start a reusable stopped container again. Returns undefined (after cleaning
+   * up) when Docker can't start it, so the caller falls back to recreating.
+   */
+  private async resumeContainer(
+    existing: ContainerInfo,
+    containerName: string,
+    detach: boolean
+  ): Promise<RunResult | undefined> {
+    logger.info(`Reusing stopped container '${containerName}' (pass --recreate for a fresh one)`);
+    await this.startSidecars();
+    const container = this.docker.getContainer(existing.Id);
+    try {
+      await container.start();
+    } catch (error) {
+      logger.warn({ error }, `Could not restart '${containerName}'; recreating it`);
+      return undefined;
+    }
+    this.containerId = existing.Id;
+
+    if (detach) {
+      logger.info({ containerId: this.containerId }, "Container started");
+      await this.fixMountPermissions(container);
+      return { containerId: this.containerId, status: "running" };
+    }
+    return await this.runInteractive(container, { started: true });
   }
 
   /**
@@ -636,12 +748,17 @@ export class DockerRunner implements Runner {
   /**
    * Run container in interactive mode, wait for exit
    */
-  private async runInteractive(container: Docker.Container): Promise<RunResult> {
+  private async runInteractive(
+    container: Docker.Container,
+    options?: { started?: boolean }
+  ): Promise<RunResult> {
     const { spawn } = await import("child_process");
 
-    // Start container first
-    logger.info("Starting container...");
-    await container.start();
+    // Start container first (a resumed container is already started)
+    if (!options?.started) {
+      logger.info("Starting container...");
+      await container.start();
+    }
     logger.info({ containerId: this.containerId }, "Container started");
 
     // Fix ownership of bind-mounted session directories so the container user can write

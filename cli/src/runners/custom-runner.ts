@@ -45,7 +45,11 @@ export class CustomRunner implements Runner {
     );
   }
 
-  async start(options?: { detach?: boolean; command?: string[] }): Promise<RunResult> {
+  async start(options?: {
+    detach?: boolean;
+    command?: string[];
+    recreate?: boolean;
+  }): Promise<RunResult> {
     const { detach = false } = options || {};
 
     try {

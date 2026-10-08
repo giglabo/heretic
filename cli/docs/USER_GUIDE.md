@@ -24,19 +24,45 @@ Each session gets its own container, its own `.heretic/temp/<session>/` director
 `~/.claude` / `~/.copilot`, so chat history, settings, `.claude.json` and generated MCP config are
 separate), and its own build-sidecar network and builder containers.
 
-If you start the same profile + session again while that session is still **running** (or paused),
-`run` refuses and exits with code 1 instead of replacing the live container:
+#### Reusing a session's container
 
-```
-Agent 'myagent' is already running in this folder in session 'default' (heretic-myagent-default-1a2b3c4d).
-Run another one in a separate session: heretic-cli run myagent -s <name>
-Or attach to it: heretic-cli attach myagent -s default
+A session keeps **one** container, and `run` reuses it instead of creating a new one every time, so
+packages you installed and files you changed inside the container survive between runs:
+
+| State of the session's container | `heretic-cli run myagent [-s <session>]` |
+|---|---|
+| none | creates it |
+| **running** (or paused) | attaches to it (`Ctrl+P`, `Ctrl+Q` detaches and leaves it running); with `-d` it just reports that it is running |
+| **stopped**, same configuration and image | starts it again and attaches |
+| stopped, but the profile, local override, `run` flags, secrets or image changed | recreates it (logged as a warning) |
+
+Pass **`--recreate`** for a fresh container anyway — also over a running session, which is stopped
+and removed first:
+
+```bash
+heretic-cli run myagent --recreate
+heretic-cli run myagent -s b --recreate
 ```
 
-A **stopped** container of the same session is removed and recreated, as before. The same profile
-and session in two *different* folders never collide (the folder hash is part of every name,
-including the compose runner's project name). The check does not apply to the `custom` runner,
-whose container names come from your own compose file.
+"The session's container" is the one named `heretic-<profile>-<session>-<hash8>` **and** labelled
+with that exact profile, folder and session, so several profiles in one folder (`claude`,
+`claude-zai`, `copilot`) never pick each other's container. A running container whose name matches
+but whose labels don't (e.g. sessions `a.b` and `a-b`, which sanitize to the same name) is refused
+with exit code 1; use another `-s`.
+
+Only the container's own filesystem is reused; `.heretic/temp/<session>/` (`~/.claude`) lives on
+the host either way. Restarting a container runs its shell again, so the agent starts a new
+conversation — `claude --continue` picks up the previous one. A custom command
+(`run myagent -- npm test`) is part of the configuration: it reuses only a stopped container made
+with the same command, and is refused for a running session (use another `-s` or `--recreate`).
+
+The `docker` runner decides reuse by a hash of the container's create options (label
+`heretic.config-hash`) and the image ID; the `compose` runner leaves it to `docker compose up`
+(which recreates on config change) and passes `--force-recreate` for `--recreate`. Neither applies
+to the `custom` runner, whose container names come from your own compose file. Containers created by
+older heretic-cli versions have no hash and are recreated once. The same profile and session in two
+*different* folders never collide (the folder hash is part of every name, including the compose
+runner's project name).
 
 What sessions do **not** separate:
 

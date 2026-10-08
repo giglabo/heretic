@@ -130,7 +130,7 @@ For non-copilot agents, the docker-runner seeds `.claude.json` with `{ "hasCompl
 
 ### Sessions (several agents in one folder)
 
-The agent container is `heretic-<profile>-<session>-<hash8>` (`getAgentContainerName()` in `src/utils/session.ts`; `hash8` = SHA-256 of the project dir), and the compose runner's project name is `heretic-<profile>-<session>-<hash8>` too. `run` refuses (exit 1) to start a profile + session that is already running in the same folder (`ensureSessionFree()` in `run-agent.ts`), because the runners replace a same-named container; a stopped one is still recreated. Two agents on one profile in one folder need different `-s <session>` values; each session gets its own `.heretic/temp/<session>/` (`~/.claude`), container and sidecar network, but shares the workspace mount.
+The agent container is `heretic-<profile>-<session>-<hash8>` (`getAgentContainerName()` in `src/utils/session.ts`; `hash8` = SHA-256 of the project dir), and the compose runner's project name is `heretic-<profile>-<session>-<hash8>` too. A container counts as the session's only if its labels (`heretic.agent`/`heretic.project`/`heretic.session`) also match (`ownsSessionContainer()` in `src/utils/container-reuse.ts`). `run` **reuses** it: a running one is attached to (`handleLiveSession()` in `run-agent.ts`), a stopped one is restarted when its `heretic.config-hash` label and image ID still match, otherwise it is recreated; `--recreate` always creates a fresh one. Two agents on one profile in one folder need different `-s <session>` values; each session gets its own `.heretic/temp/<session>/` (`~/.claude`), container and sidecar network, but shares the workspace mount.
 
 ### Running as Root
 

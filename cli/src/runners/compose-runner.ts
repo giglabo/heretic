@@ -43,8 +43,12 @@ export class ComposeRunner implements Runner {
     this.projectName = `heretic-${this.sanitizeProjectName(config.name)}-${this.sanitizeProjectName(config.sessionName)}-${projectDirHash(config.projectDir)}`;
   }
 
-  async start(options?: { detach?: boolean; command?: string[] }): Promise<RunResult> {
-    const { detach = false, command } = options || {};
+  async start(options?: {
+    detach?: boolean;
+    command?: string[];
+    recreate?: boolean;
+  }): Promise<RunResult> {
+    const { detach = false, command, recreate = false } = options || {};
 
     try {
       // Check docker compose availability
@@ -65,6 +69,11 @@ export class ComposeRunner implements Runner {
 
       if (detach) {
         args.push("-d");
+      }
+      // Without it compose restarts the session's stopped container when the
+      // generated config is unchanged (its own config-hash), like the docker runner.
+      if (recreate) {
+        args.push("--force-recreate");
       }
 
       logger.info({ projectName: this.projectName }, "Starting compose services");

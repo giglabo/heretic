@@ -148,6 +148,10 @@ export function createProgram(): Command {
     .description("Run an agent by profile name")
     .option("-d, --detach", "Run container in background (detached mode)", false)
     .option("-s, --session <name>", "Session name (default: 'default')")
+    .option(
+      "--recreate",
+      "Create a fresh container for this session instead of reusing or attaching to the existing one"
+    )
     .option("--mcp <value>", "MCP server config (JSON string or path to .json file)")
     .option("--root", "Run the container as root (keeps /home/agent as HOME)")
     .option(
@@ -191,6 +195,7 @@ export function createProgram(): Command {
       await runAgent(agentName, {
         detach: options.detach,
         command: customCommand,
+        recreate: options.recreate,
         mcp: options.mcp,
         session: options.session,
         asRoot: options.root,
@@ -264,10 +269,12 @@ export function createProgram(): Command {
     const portHostIp = valuesOf("--port-host-ip").at(-1);
     const portOffset = valuesOf("--port-offset").at(-1);
     const ports = own.includes("--no-ports") ? false : undefined;
+    const recreate = own.includes("--recreate") || undefined;
 
     await runAgent(unknownCommand, {
       detach,
       command: customCommand,
+      recreate,
       session,
       asRoot,
       sidecar,

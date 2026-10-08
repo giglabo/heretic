@@ -161,8 +161,9 @@ heretic-cli agents delete <name> -f        # Delete without confirmation
 heretic-cli agents mcp <name>              # Paste MCP JSON into global profile
 heretic-cli agents mcp <name> --file f.json  # Read MCP JSON from file
 heretic-cli agents mcp <name> --local      # Apply to local override
-heretic-cli run <name>              # Run in interactive mode
+heretic-cli run <name>              # Run interactively (reuses/attaches to the session's container)
 heretic-cli run <name> -d           # Run in detached mode
+heretic-cli run <name> --recreate   # Fresh container for the session (replaces a running one)
 heretic-cli run <name> -s feat-x   # Run in a named session
 heretic-cli run <name> --sidecar node --sidecar python   # Attach build sidecars (repeatable)
 heretic-cli run <name> --builder-image node=my-builder:latest  # Override a builder image
@@ -470,11 +471,28 @@ covered automatically. The bare-agent shortcut parses argv itself and is not rew
 **Sessions and naming.** The agent container is `heretic-<profile>-<session>-<hash8>`
 (`getAgentContainerName()` in `src/utils/session.ts`, shared by the docker and compose runners;
 `<hash8>` = first 8 hex chars of SHA-256 of the project dir). The compose runner's project name is
-`heretic-<profile>-<session>-<hash8>` too. Before starting, `run` (`ensureSessionFree()` in
-`src/commands/run-agent.ts`) looks the name up and **refuses with exit 1** if that container is
-running, paused or restarting — the runners' `removeExistingContainer()` would otherwise kill the
-live agent. A stopped container is still removed and recreated. To run the same profile twice in
-one folder, use different `-s` sessions. Skipped for the `custom` runner.
+`heretic-<profile>-<session>-<hash8>` too. Container reuse (`src/utils/container-reuse.ts`) — a session container is "ours"
+only if the name matches **and** `ownsSessionContainer()` agrees: labels `heretic.managed=true`,
+`heretic.agent`, `heretic.project`, `heretic.session` equal the resolved profile/folder/session and
+it is not a `heretic.role=build-sidecar`.
+
+- `run` (`handleLiveSession()` in `src/commands/run-agent.ts`) checks the name first. If it is
+  running/paused/restarting: not ours → exit 1; `--recreate` → stop + remove, then continue;
+  custom command → exit 1; `-d` → report and return; otherwise `docker attach`
+  (`attachToContainer()`), exit code propagated unless the user detached.
+- `DockerRunner.start({ recreate })` computes the create options first (sidecar wiring via the pure
+  `SidecarManager.computeWiring()`), stores `computeConfigHash(options)` in the
+  `heretic.config-hash` label, and — unless `recreate` — restarts a **stopped** container that is
+  ours, has the same hash and the same `ImageID` as the current image (`findReusableContainer()`,
+  `resumeContainer()`). Otherwise (or if `start` fails) it falls back to
+  `removeExistingContainer()` + create. Sidecars are (re)started in both paths.
+- `ComposeRunner` relies on `docker compose up`'s own config hash and adds `--force-recreate` for
+  `recreate`. `CustomRunner` ignores it.
+- `attach <name>` resolves: exact container name → profile name in the current folder (`-s` or the
+  only/`default` session) → container ID prefix. No substring matching, so `attach claude` never
+  picks `claude-zai` or another folder's `claude`.
+
+To run the same profile twice in one folder, use different `-s` sessions.
 
 ### File Locations
 

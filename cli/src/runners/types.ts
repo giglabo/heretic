@@ -35,9 +35,11 @@ export interface Runner {
    * @param options - Start options
    * @param options.detach - Run container in background (detached mode)
    * @param options.command - Override the default command specified in config
+   * @param options.recreate - Always create a fresh container instead of
+   *        restarting this session's stopped one (docker, compose)
    * @returns RunResult with container ID and status
    */
-  start(options?: { detach?: boolean; command?: string[] }): Promise<RunResult>;
+  start(options?: { detach?: boolean; command?: string[]; recreate?: boolean }): Promise<RunResult>;
 
   /**
    * Stop the running container.
