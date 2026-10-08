@@ -184,6 +184,40 @@ jobs:
           id
           sudo grep -vE 'debug1: (channel|session|server_input)' /tmp/sshd-2222.log | tail -60
 
+  # The full "Linux container → Mac host" pairing: Intel macOS runners support
+  # nested virtualization, so colima runs Linux containers there (Apple Silicon
+  # hosted runners cannot). The container reaches the Mac via host-gateway.
+  ssh-docker-host-macos:
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun build ./src/index.ts --compile --outfile dist/heretic-cli
+      - name: Docker via colima
+        run: |
+          brew install colima docker
+          colima start --cpu 2 --memory 4
+      - name: Start sshd for the runner user
+        run: |
+          sudo ssh-keygen -A
+          printf '%s\n' 'Port 2222' 'ListenAddress 0.0.0.0' 'UsePAM yes' \
+            'PasswordAuthentication no' 'KbdInteractiveAuthentication no' \
+            'HostKey /etc/ssh/ssh_host_ed25519_key' 'HostKey /etc/ssh/ssh_host_ecdsa_key' \
+            'HostKey /etc/ssh/ssh_host_rsa_key' 'PidFile /tmp/sshd-2222.pid' > /tmp/sshd-2222.conf
+          sudo /usr/sbin/sshd -f /tmp/sshd-2222.conf -E /tmp/sshd-2222.log
+      - name: Linux container → this Mac (full docker-host test)
+        run: ../scripts/test-ssh-docker-host.sh --cli "$PWD/dist/heretic-cli" --port 2222
+      - name: sshd log
+        if: failure()
+        run: sudo tail -60 /tmp/sshd-2222.log
+
   exec-server:
     runs-on: ubuntu-latest
     defaults:

@@ -124,14 +124,14 @@ On every push to `main` / `feat/**` and every PR to `main`:
 | `binaries` | cross-compiles all five release binaries (artifacts kept 7 days) |
 | `smoke` | builds and runs the binary on Ubuntu, macOS and Windows |
 | `ssh-e2e` | `tests/e2e/ssh-e2e.sh` incl. a real container reaching the runner via `host-gateway`, then `test-ssh-docker-host.sh` as the regular runner user |
-| `ssh-macos-host` | the host half on a real macOS runner: macOS sshd, zsh, BSD userland, a real Mach-O from `cc` and its routing |
+| `ssh-macos-host` | the host half on an Apple Silicon macOS runner: macOS sshd, BSD userland, a real Mach-O from `cc` and its routing |
+| `ssh-docker-host-macos` | the full pairing on an Intel macOS runner: colima runs the Linux container, which builds and runs on the Mac over SSH (`test-ssh-docker-host.sh`, ~15 min) |
 | `exec-server` | `go vet` + build of the sidecar exec-server |
 
-Hosted macOS runners have no Docker (no nested virtualization) and runners cannot reach
-each other, so the literal *Linux container → Mac host* pairing is not possible on hosted
-CI; it is covered by its two halves (`ssh-e2e` for the container side, `ssh-macos-host`
-for the Mac side) and by running `scripts/test-ssh-docker-host.sh` on a Mac. A self-hosted
-macOS runner with Docker Desktop could run that script unchanged.
+Apple Silicon hosted macOS runners cannot run Linux containers (no nested virtualization);
+Intel ones (`macos-15-intel`) can, with colima, so `ssh-docker-host-macos` runs the literal
+*Linux container → Mac host* pairing in CI. Docker Desktop and colima both route
+`host-gateway` to the Mac, which is what `ssh.host: docker-host` relies on.
 
 ## Releasing
 
