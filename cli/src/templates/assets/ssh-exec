@@ -1,0 +1,398 @@
+#!/bin/bash
+# ssh-exec - Execute a toolchain command on a remote host via SSH
+#
+# Mirrors the sidecar-exec contract but routes commands over SSH. The image
+# entrypoint writes /opt/sidecar/wrappers/<cmd> -> `ssh-exec <cmd> "$@"` for
+# every command listed in SSH_COMMANDS that is NOT installed in the container
+# (the container always wins).
+#
+# Usage:
+#   ssh-exec <command> [args...]       run one command on the host
+#   ssh-exec --check                   verify connectivity + remote cwd (exit 0 = ok)
+#   ssh-exec --probe <cmd>...          print the subset of <cmd>s available on the host
+#   ssh-exec --run <cmd> [args...]     same as the first form; installed as `host-run`
+#   ssh-exec --auto <cmd> [args...]    run locally when the container can execute it,
+#                                      otherwise on the host; installed as `auto-run`
+#                                      (e.g. a Mach-O binary that `cargo build` produced
+#                                      on a macOS host)
+#
+# Environment:
+#   SSH_HOST             Remote host (required)
+#   SSH_PORT             SSH port (default: 22)
+#   SSH_USER             SSH username (default: agent)
+#   SSH_KEY_PATH         Private key inside the container (default: /home/agent/.ssh/id_rsa)
+#   SSH_KNOWN_HOSTS      known_hosts file; when it exists host keys are verified strictly
+#   SSH_HOST_KEY_ALIAS   name to look the host key up under (HostKeyAlias), e.g. when
+#                        connecting by IP to a host pinned as host.docker.internal
+#   SSH_HOST_CWD         Host directory that corresponds to SSH_WORKSPACE
+#   SSH_WORKSPACE        Container workspace root (default: /workspace)
+#   SSH_HOST_PATH        PATH to export on the host (captured by `heretic-cli ssh setup`)
+#   SSH_LOGIN_SHELL      1 = run through the remote user's login shell ($SHELL -lc)
+#   SSH_ENV_PASSTHROUGH  Space/comma separated env var names forwarded to the host
+#   SSH_CONNECT_TIMEOUT  Seconds (default: 10)
+#   SSH_CONTROL_PERSIST  Seconds to keep a shared connection open (default: 60, 0 = off)
+#   SSH_MAX_SESSIONS     Max concurrent commands sharing the connection (default: 8;
+#                        keep below the host sshd's MaxSessions, which defaults to 10)
+#   SSH_TTY              1 = force a remote TTY (-tt): remote gets SIGHUP when the
+#                        wrapper is killed, but stderr is merged into stdout
+#
+# Exit codes: the remote command's exit code; 255 = ssh transport failure
+# (or the remote command itself exited 255); 2 = usage / local config error.
+
+set -uo pipefail
+
+HOST="${SSH_HOST:-}"
+PORT="${SSH_PORT:-22}"
+USER_NAME="${SSH_USER:-agent}"
+KEY_PATH="${SSH_KEY_PATH:-/home/agent/.ssh/id_rsa}"
+KNOWN_HOSTS="${SSH_KNOWN_HOSTS:-}"
+WORKSPACE="${SSH_WORKSPACE:-/workspace}"
+WORKSPACE="${WORKSPACE%/}"
+HOST_CWD="${SSH_HOST_CWD:-}"
+HOST_CWD="${HOST_CWD%/}"
+CONNECT_TIMEOUT="${SSH_CONNECT_TIMEOUT:-10}"
+CONTROL_PERSIST="${SSH_CONTROL_PERSIST:-60}"
+MAX_SESSIONS="${SSH_MAX_SESSIONS:-8}"
+
+die() {
+    echo "ssh-exec: $*" >&2
+    exit 2
+}
+
+[[ -n "$HOST" ]] || die "SSH_HOST is not set"
+
+# POSIX single-quote escaping: valid for sh, bash, dash, ksh and zsh (not fish/csh).
+q() {
+    local s=${1//\'/\'\\\'\'}
+    printf "'%s'" "$s"
+}
+
+# Map a container path under SSH_WORKSPACE to the matching host path.
+# Prints the input unchanged when there is no mapping or it lies outside.
+map_path() {
+    local p="$1"
+    if [[ -n "$HOST_CWD" ]]; then
+        if [[ "$p" == "$WORKSPACE" ]]; then
+            printf '%s' "$HOST_CWD"
+            return
+        fi
+        if [[ "$p" == "$WORKSPACE/"* ]]; then
+            printf '%s' "$HOST_CWD${p#"$WORKSPACE"}"
+            return
+        fi
+    fi
+    printf '%s' "$p"
+}
+
+# Map absolute workspace paths inside an argument ("/workspace/x" and "--flag=/workspace/x").
+map_arg() {
+    local a="$1"
+    if [[ -z "$HOST_CWD" ]]; then
+        printf '%s' "$a"
+    elif [[ "$a" == "$WORKSPACE" || "$a" == "$WORKSPACE/"* ]]; then
+        map_path "$a"
+    elif [[ "$a" == -*=* ]]; then
+        local k="${a%%=*}" v="${a#*=}"
+        if [[ "$v" == "$WORKSPACE" || "$v" == "$WORKSPACE/"* ]]; then
+            printf '%s=%s' "$k" "$(map_path "$v")"
+        else
+            printf '%s' "$a"
+        fi
+    else
+        printf '%s' "$a"
+    fi
+}
+
+# Resolve the remote working directory. With a mapping, anything outside the
+# workspace is refused: running a build in the wrong tree is worse than failing.
+remote_cwd() {
+    local here="$PWD"
+    if [[ -z "$HOST_CWD" ]]; then
+        printf '%s' "$here"   # same-path mount: container path == host path
+        return 0
+    fi
+    if [[ "$here" == "$WORKSPACE" || "$here" == "$WORKSPACE/"* ]]; then
+        map_path "$here"
+        return 0
+    fi
+    echo "ssh-exec: current directory $here is outside $WORKSPACE; it has no host equivalent (SSH_HOST_CWD=$HOST_CWD)" >&2
+    return 1
+}
+
+# Private dir for the control socket and a permission-fixed key copy. Under
+# /tmp, not $TMPDIR: macOS's long $TMPDIR would push the control socket past
+# the 104-byte unix socket path limit.
+RUNTIME_DIR="${SSH_RUNTIME_DIR:-/tmp/heretic-ssh-$(id -u)}"
+mkdir -p "$RUNTIME_DIR" 2>/dev/null && chmod 700 "$RUNTIME_DIR" 2>/dev/null
+
+# Resolve the identity file. A bind-mounted key often has host ownership or
+# 0644 permissions, which ssh refuses ("UNPROTECTED PRIVATE KEY FILE"): copy it
+# to a 0600 file we own. An empty file (e.g. a /dev/null mount) is an error
+# rather than a silent fallback to interactive auth.
+IDENTITY=""
+if [[ -e "$KEY_PATH" ]]; then
+    [[ -r "$KEY_PATH" ]] || die "SSH key $KEY_PATH is not readable by $(id -un) (uid $(id -u)); fix its owner/permissions on the host"
+    [[ -s "$KEY_PATH" ]] || die "SSH key $KEY_PATH is empty"
+    # GNU stat (Linux containers) or BSD stat (macOS, when run on a host)
+    mode=$(stat -c '%a' "$KEY_PATH" 2>/dev/null || stat -f '%Lp' "$KEY_PATH" 2>/dev/null || echo "")
+    owner=$(stat -c '%u' "$KEY_PATH" 2>/dev/null || stat -f '%u' "$KEY_PATH" 2>/dev/null || echo "")
+    if [[ "$owner" == "$(id -u)" && ( "$mode" == "600" || "$mode" == "400" ) ]]; then
+        IDENTITY="$KEY_PATH"
+    else
+        IDENTITY="$RUNTIME_DIR/identity"
+        if [[ ! -s "$IDENTITY" ]] || ! cmp -s "$KEY_PATH" "$IDENTITY"; then
+            (umask 077 && cat "$KEY_PATH" > "$IDENTITY.tmp" && mv -f "$IDENTITY.tmp" "$IDENTITY") \
+                || die "cannot copy SSH key to $IDENTITY"
+        fi
+    fi
+fi
+
+SSH_OPTS=(
+    -p "$PORT"
+    -o BatchMode=yes
+    -o ConnectTimeout="$CONNECT_TIMEOUT"
+    -o ServerAliveInterval=15
+    -o ServerAliveCountMax=4
+    -o LogLevel=ERROR
+)
+
+if [[ -n "$KNOWN_HOSTS" && -s "$KNOWN_HOSTS" ]]; then
+    SSH_OPTS+=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KNOWN_HOSTS")
+    if [[ -n "${SSH_HOST_KEY_ALIAS:-}" ]]; then
+        SSH_OPTS+=(-o HostKeyAlias="$SSH_HOST_KEY_ALIAS")
+    fi
+else
+    SSH_OPTS+=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+fi
+
+if [[ -n "$IDENTITY" ]]; then
+    SSH_OPTS+=(-i "$IDENTITY" -o IdentitiesOnly=yes)
+fi
+
+if [[ "${SSH_TTY:-}" == "1" ]]; then
+    SSH_OPTS+=(-tt)
+else
+    SSH_OPTS+=(-T)
+fi
+
+# Options without multiplexing: the fallback when no control socket can exist.
+NOMUX_OPTS=("${SSH_OPTS[@]}")
+
+MUX="false"
+if [[ "$CONTROL_PERSIST" != "0" && "$CONTROL_PERSIST" != "no" && -d "$RUNTIME_DIR" ]]; then
+    MUX="true"
+    SSH_OPTS+=(
+        -o ControlMaster=auto
+        -o ControlPath="$RUNTIME_DIR/cm-%C"
+        -o ControlPersist="$CONTROL_PERSIST"
+    )
+fi
+
+# Prologue run on the host before the command: PATH + forwarded env.
+prologue() {
+    if [[ -n "${SSH_HOST_PATH:-}" ]]; then
+        printf 'PATH=%s; export PATH; ' "$(q "$SSH_HOST_PATH")"
+    fi
+    local names name
+    names="${SSH_ENV_PASSTHROUGH:-}"
+    for name in ${names//,/ }; do
+        [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        [[ -n "${!name+x}" ]] || continue
+        printf '%s=%s; export %s; ' "$name" "$(q "${!name}")" "$name"
+    done
+}
+
+# Wrap a POSIX script so it runs through the user's login shell when asked.
+wrap_login() {
+    local script="$1"
+    if [[ "${SSH_LOGIN_SHELL:-}" == "1" ]]; then
+        # shellcheck disable=SC2016  # $SHELL must expand on the remote host
+        printf 'exec "${SHELL:-/bin/sh}" -lc %s' "$(q "$script")"
+    else
+        printf '%s' "$script"
+    fi
+}
+
+# Start the shared master connection once, under a lock. Without this, parallel
+# wrappers race to create it and fall back to separate TCP connections, which
+# the host's MaxStartups throttling then drops at random.
+ensure_master() {
+    [[ "$MUX" == "true" ]] || return 0
+    if command -v flock >/dev/null 2>&1; then
+        (
+            flock 9
+            ssh "${SSH_OPTS[@]}" -O check "${USER_NAME}@${HOST}" >/dev/null 2>&1 \
+                || ssh "${SSH_OPTS[@]}" -f -N -o ControlMaster=yes "${USER_NAME}@${HOST}" \
+                    </dev/null >/dev/null 2>&1
+        ) 9>"$RUNTIME_DIR/master.lock"
+    else
+        # no flock (macOS host): best effort, a lost race just means a second connection
+        ssh "${SSH_OPTS[@]}" -O check "${USER_NAME}@${HOST}" >/dev/null 2>&1 \
+            || ssh "${SSH_OPTS[@]}" -f -N -o ControlMaster=yes "${USER_NAME}@${HOST}" \
+                </dev/null >/dev/null 2>&1
+    fi
+    # No master (the directory cannot hold a unix socket — NFS, some VM shares —
+    # or login failed): use one plain connection per command so the real error,
+    # not a mux error, reaches the caller.
+    if ! ssh "${SSH_OPTS[@]}" -O check "${USER_NAME}@${HOST}" >/dev/null 2>&1; then
+        SSH_OPTS=("${NOMUX_OPTS[@]}")
+        MUX="false"
+    fi
+    return 0
+}
+
+# Take one of MAX_SESSIONS slots (fd 8 stays locked while ssh runs), so the
+# multiplexed connection never exceeds the host's per-connection MaxSessions.
+acquire_slot() {
+    [[ "$MUX" == "true" ]] || return 0
+    command -v flock >/dev/null 2>&1 || return 0
+    [[ "$MAX_SESSIONS" =~ ^[1-9][0-9]*$ ]] || return 0
+    local i
+    while true; do
+        for ((i = 0; i < MAX_SESSIONS; i++)); do
+            exec 8>"$RUNTIME_DIR/slot.$i"
+            if flock -n 8; then
+                return 0
+            fi
+            exec 8>&-
+        done
+        sleep 0.1
+    done
+}
+
+run_ssh() {
+    local remote="$1"
+    ensure_master
+    acquire_slot
+    ssh "${SSH_OPTS[@]}" "${USER_NAME}@${HOST}" "$remote"
+    local rc=$?
+    if [[ $rc -eq 255 ]]; then
+        echo "ssh-exec: ssh to ${USER_NAME}@${HOST}:${PORT} failed (exit 255) — key, known_hosts or sshd problem, or the command itself exited 255" >&2
+    fi
+    return $rc
+}
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: ssh-exec <command> [args...] | --run|--auto <command> [args...] | --check | --probe <cmd>..." >&2
+    exit 2
+fi
+
+# True when the container itself can execute <cmd>: a local command, a script,
+# or an ELF binary for this CPU. Mach-O, PE and foreign-arch ELF are host-only.
+runs_locally() {
+    local cmd="$1" path clean_path magic machine
+    if [[ "$cmd" == */* ]]; then
+        path="$cmd"
+    else
+        clean_path=$(echo "$PATH" | tr ':' '\n' | grep -v '^/opt/sidecar/wrappers$' | tr '\n' ':')
+        path=$(PATH="$clean_path" command -v -- "$cmd") || return 1
+        [[ "$path" == */* ]] || return 0   # shell builtin / function
+    fi
+    [[ -f "$path" && -x "$path" ]] || return 1
+    magic=$(od -An -tx1 -N4 -- "$path" 2>/dev/null | tr -d ' \n')
+    case "$magic" in
+        7f454c46)
+            # ELF e_machine (little-endian u16 at offset 18)
+            machine=$(od -An -tx1 -j18 -N2 -- "$path" 2>/dev/null | tr -d ' \n')
+            case "$(uname -m)" in
+                x86_64) [[ "$machine" == "3e00" ]] ;;
+                aarch64 | arm64) [[ "$machine" == "b700" ]] ;;
+                *) return 0 ;;
+            esac
+            ;;
+        2321*) return 0 ;;   # "#!" script: its interpreter is resolved (and routed) normally
+        *) return 1 ;;       # Mach-O, PE, unknown
+    esac
+}
+
+case "$1" in
+    --run)
+        shift
+        [[ $# -ge 1 ]] || die "usage: host-run <command> [args...]"
+        ;;
+    --auto)
+        shift
+        [[ $# -ge 1 ]] || die "usage: auto-run <command> [args...]"
+        if runs_locally "$1"; then
+            exec "$@"
+        fi
+        ;;
+    --check)
+        cwd=$(remote_cwd) || exit 2
+        script="$(prologue)cd $(q "$cwd") || exit 3; echo ok"
+        run_ssh "$(wrap_login "$script")" </dev/null
+        exit $?
+        ;;
+    --probe)
+        shift
+        names=""
+        for c in "$@"; do
+            [[ "$c" =~ ^[A-Za-z0-9._+-]+$ ]] && names+=" $(q "$c")"
+        done
+        [[ -n "$names" ]] || exit 0
+        script="$(prologue)for c in$names; do command -v \"\$c\" >/dev/null 2>&1 && echo \"\$c\"; done; exit 0"
+        run_ssh "$(wrap_login "$script")" </dev/null
+        exit $?
+        ;;
+esac
+
+# --- run one command, killing its remote process tree if we are interrupted ---
+#
+# Closing an ssh session does NOT signal a non-TTY remote command (and with a
+# multiplexed connection not even -tt helps), so an interrupted `cargo build`
+# or `npm run dev` would keep running on the host. The remote shell records its
+# pid; on TERM/INT/HUP we open a second session and kill that process tree.
+# SIGKILL cannot be trapped: a wrapper killed with -9 still orphans its build.
+
+TOKEN="$(id -u)-$$-${RANDOM}${RANDOM}"
+# shellcheck disable=SC2016  # expanded on the remote host
+PIDFILE='"${TMPDIR:-/tmp}/heretic-ssh-exec.'"$TOKEN"'.pid"'
+SSH_PID=""
+
+kill_remote() {
+    local script
+    # shellcheck disable=SC2016  # expanded on the remote host
+    script='d() { for c in $(pgrep -P "$1" 2>/dev/null); do d "$c"; done; echo "$1"; }; '
+    script+="if [ -f $PIDFILE ]; then r=\$(cat $PIDFILE); kill -TERM \$(d \"\$r\") 2>/dev/null; rm -f $PIDFILE; fi"
+    # `timeout` is absent on macOS; an empty array would also trip bash 3.2's set -u
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 10 ssh "${SSH_OPTS[@]}" "${USER_NAME}@${HOST}" "$script" </dev/null >/dev/null 2>&1 || true
+    else
+        ssh "${SSH_OPTS[@]}" "${USER_NAME}@${HOST}" "$script" </dev/null >/dev/null 2>&1 || true
+    fi
+}
+
+on_signal() {
+    local code=$1
+    trap - TERM INT HUP
+    [[ -n "$SSH_PID" ]] && kill -TERM "$SSH_PID" 2>/dev/null
+    kill_remote
+    exit "$code"
+}
+
+cwd=$(remote_cwd) || exit 2
+
+cmdline=""
+for arg in "$@"; do
+    mapped=$(map_arg "$arg"; printf x)   # sentinel keeps trailing newlines
+    cmdline+=" $(q "${mapped%x}")"
+done
+
+script="$(prologue)cd $(q "$cwd") || exit 1; echo \$\$ > $PIDFILE;$cmdline; r=\$?; rm -f $PIDFILE; exit \$r"
+
+trap 'on_signal 143' TERM
+trap 'on_signal 130' INT
+trap 'on_signal 129' HUP
+
+ensure_master
+acquire_slot
+# Background + wait so the traps can run while ssh is busy; <&0 keeps stdin
+# (a non-interactive shell would otherwise give a background job /dev/null).
+ssh "${SSH_OPTS[@]}" "${USER_NAME}@${HOST}" "$(wrap_login "$script")" <&0 &
+SSH_PID=$!
+wait "$SSH_PID"
+rc=$?
+if [[ $rc -eq 255 ]]; then
+    echo "ssh-exec: ssh to ${USER_NAME}@${HOST}:${PORT} failed (exit 255) — key, known_hosts or sshd problem, or the command itself exited 255" >&2
+fi
+exit $rc

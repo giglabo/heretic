@@ -1,0 +1,14 @@
+{
+  "enabledMcpjsonServers": [],
+  "dangerouslySkipPermissions": true,
+  "allowedTools": [
+    "Bash",
+    "Edit",
+    "Read",
+    "Write",
+    "Glob",
+    "Grep",
+    "LS",
+    "View"
+  ]
+}

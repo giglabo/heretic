@@ -1,0 +1,49 @@
+# Gitleaks configuration
+# https://github.com/gitleaks/gitleaks
+
+title = "Heretic gitleaks config"
+
+[extend]
+# Use the default gitleaks rules as a base
+useDefault = true
+
+# Allow known example/test placeholder values
+[allowlist]
+  description = "Allow placeholder and test values"
+
+  paths = [
+    '''node_modules/''',
+  ]
+
+  regexTarget = "match"
+  regexes = [
+    # Obvious placeholder tokens used in examples and tests
+    '''sk-ant-xxxxx''',
+    '''ghp_test123''',
+    '''ghp_abc''',
+    '''sk-ant-api03-1234567890abcdefghijklmnopqrstuvwxyz''',
+    '''sk-ant-api03-plaintoken123''',
+    '''sk-ant-api03-secret''',
+    '''sk-ant-api03-actual-key-value''',
+    # Test fixture values (agents-show masking tests)
+    '''test-token''',
+    '''global-token''',
+    '''secret-key''',
+    '''supersecret123''',
+    '''token123''',
+    '''actual-password-123''',
+    '''env-secret-value''',
+    '''key123456789012''',
+    '''token123456789''',
+    '''pass123456789''',
+    '''secret123456789''',
+    '''apikey1234567''',
+    '''oauth123456789''',
+    '''my-api-key-12345''',
+    # Example DB/Redis URLs with dev credentials
+    '''postgres://dev:dev@''',
+    '''redis://redis:6379''',
+    # Documentation patterns (partial key references)
+    '''sk-ant-api03-\.\.\.''',
+    '''sk-ant-api03-abc123''',
+  ]
