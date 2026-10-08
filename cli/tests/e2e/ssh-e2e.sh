@@ -50,6 +50,9 @@ printf '#!/bin/sh\necho "npm-host $* (cwd=$(pwd))"\n' > "$HOME_DIR/.nvm/bin/npm"
 chmod +x "$HOME_DIR/.cargo/bin/cargo" "$HOME_DIR/.nvm/bin/npm"
 printf 'case $- in *i*) ;; *) return;; esac\nexport PATH="$HOME/.nvm/bin:$PATH"\n' > "$HOME_DIR/.bashrc"
 printf '[ -f ~/.bashrc ] && . ~/.bashrc\nexport PATH="$HOME/.cargo/bin:$PATH"\n' > "$HOME_DIR/.profile"
+# bash reads ~/.profile only when there is no ~/.bash_profile / ~/.bash_login
+# (some /etc/skel ship one) — keep the login environment deterministic.
+rm -f "$HOME_DIR/.bash_profile" "$HOME_DIR/.bash_login"
 mkdir -p "$HOME_DIR/.heretic/agents"
 cat > "$HOME_DIR/.heretic/agents/e2e.yaml" <<EOF
 image: ${E2E_IMAGE:-heretic-ssh-e2e:latest}
@@ -171,6 +174,7 @@ if [[ -n "$CLI" ]]; then
     out=$(as_user "$LAB/heretic-cli ssh setup e2e --port $PORT --presets rust,node" 2>&1); rc=$?
     echo "$out" | sed 's/^/    /'
     expect_eq "ssh setup exit code" "0" "$rc"
+    expect_eq "generated key is private" "600" "$(stat -c %a "$HOME_DIR/.heretic/ssh/e2e_ed25519")"
     grep -q "host_path: .*\.nvm/bin" "$HOME_DIR/.heretic/agents/e2e.yaml" \
         && pass "interactive login PATH captured (nvm-style .bashrc)" || fail "host_path not captured"
     grep -q "known_hosts:" "$HOME_DIR/.heretic/agents/e2e.yaml" && pass "host key pinned" || fail "no known_hosts"
@@ -201,7 +205,7 @@ EOF
     install -m 644 -o "$E2E_USER" "$HOME_DIR/.heretic/ssh/e2e_ed25519" "$KEY"
     WS_OUT=$(docker run --rm \
         --add-host host.docker.internal:host-gateway \
-        -v "$ASSETS/ssh-exec:/opt/sidecar/ssh-exec:ro" \
+        -v "$SSH_EXEC:/opt/sidecar/ssh-exec:ro" \
         -v "$ASSETS/entrypoint.sh:/entrypoint.sh:ro" \
         -v "$KEY:/etc/heretic/ssh/key:ro" \
         -v "$HOME_DIR/.heretic/ssh/e2e_known_hosts:/etc/heretic/ssh/known_hosts:ro" \

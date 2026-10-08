@@ -116,7 +116,7 @@ jobs:
       - run: ./dist/heretic-cli --version
       - run: ./dist/heretic-cli ssh presets
       - name: Embedded ssh-exec matches the source asset
-        run: diff <(./dist/heretic-cli image generate --format ssh-exec) src/templates/assets/ssh-exec
+        run: diff -B <(./dist/heretic-cli image generate --format ssh-exec) src/templates/assets/ssh-exec
 
   # SSH backend against a real sshd on the runner, then from a real container
   # that reaches the runner through host-gateway (the docker-host topology).

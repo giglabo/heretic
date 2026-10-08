@@ -157,7 +157,14 @@ function sshdHint(local: boolean, stderr = ""): string {
 }
 
 function ensureKey(keyPath: string, comment: string): void {
-  if (existsSync(keyPath)) return;
+  if (existsSync(keyPath)) {
+    // ssh ignores a group/world-readable private key ("UNPROTECTED PRIVATE KEY FILE")
+    if (process.platform !== "win32" && statSync(keyPath).mode & 0o077) {
+      chmodSync(keyPath, 0o600);
+      logRaw(`  ✓ tightened ${keyPath} to 0600`);
+    }
+    return;
+  }
   mkdirSync(join(keyPath, ".."), { recursive: true, mode: 0o700 });
   const res = spawnSync(
     "ssh-keygen",
@@ -169,6 +176,8 @@ function ensureKey(keyPath: string, comment: string): void {
   if (res.status !== 0) {
     throw new Error(`ssh-keygen failed: ${res.stderr || res.error?.message || "unknown error"}`);
   }
+  // Seen 0644 on Ubuntu 24.04 runners; ssh would then refuse the key.
+  if (process.platform !== "win32") chmodSync(keyPath, 0o600);
   logRaw(`  ✓ generated key ${keyPath}`);
 }
 
