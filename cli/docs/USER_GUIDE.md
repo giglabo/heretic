@@ -1,7 +1,7 @@
 # Heretic CLI — User Guide
 
 This guide documents end-user features of `heretic-cli`. It currently covers
-**sessions** (several agents in one folder), **publishing ports** and **tool execution backends**
+**sessions** (several agents in one folder), **MCP servers from the profile**, **Docker from the agent**, **publishing ports** and **tool execution backends**
 (the build-sidecar and SSH backends). Additional sections will be added as features are documented.
 
 ---
@@ -80,6 +80,48 @@ treated as a heretic option.
 
 Manage sessions with `heretic-cli ps` (shows the session), `heretic-cli attach <profile> -s <session>`
 and `heretic-cli stop -s <session>`.
+
+---
+
+## MCP servers from the profile
+
+A profile's `mcp:` servers are written to `.heretic/temp/<session>/.mcp.json` and mounted over
+`/workspace/.mcp.json` (Claude) or `~/.copilot/mcp-config.json` (Copilot CLI). A project that has
+its own non-empty `.mcp.json` keeps it unless the profile sets `mcp_override: true`.
+
+When the project folder has no `.mcp.json`, `run` creates an **empty** one first: the file mount
+needs that mountpoint, and Docker Desktop (macOS, Windows) cannot create it itself — the first run in
+such a folder would fail with `mountpoint … .mcp.json is outside of rootfs`. Docker on Linux
+creates the same empty file. An empty `.mcp.json` counts as "no project config", so the profile's
+servers are still mounted; add `.mcp.json` to `.gitignore` if you don't want it in the repository.
+The same applies to any file you mount inside another mounted folder in `volumes:`.
+
+---
+
+## Docker from the agent (`dind: true`)
+
+`dind: true` in a profile mounts the Docker daemon's socket at `/var/run/docker.sock` (the
+image needs a Docker CLI for `docker` to use it: `heretic-cli image build --with-docker`). The
+agent runs as a non-root user, so the container also gets the socket's group:
+
+| Host | Socket group added to the agent |
+|------|---------------------------------|
+| Linux | the socket's own group (usually `docker`; a `DOCKER_HOST=unix://…` socket when set) |
+| macOS, Windows (Docker Desktop) | `0` — the socket lives in Docker Desktop's VM as `root:root 0660` |
+
+Access to the socket is root on the Docker host, whatever the group.
+
+Containers started through the socket are created by the daemon on the **host**, so a `-v`
+source is a host path — `/workspace` does not exist there. The agent gets the project folder's
+host path as `HERETIC_HOST_WORKSPACE`:
+
+```bash
+docker run --rm -v "$HERETIC_HOST_WORKSPACE:/src" -w /src node:22 npm test   # not -v /workspace:/src
+```
+
+With the SSH backend's `container` preset and no Docker CLI in the image, `docker` runs on the
+host over SSH instead (there the working directory is already the host path); a Docker CLI in the
+image always wins over that route.
 
 ---
 
@@ -578,7 +620,7 @@ mapped). A server started this way listens on the **host**: reach it from the co
 
 | Host | Container |
 |------|-----------|
-| `ssh.key_path` (copied to `~/.heretic/ssh/run/<profile>.key`, dir 0700) | `/etc/heretic/ssh/key` (re-copied 0600 by ssh-exec) |
+| `ssh.key_path` (copied to `~/.heretic/ssh/run/<profile>.key`, dir 0700) | `/etc/heretic/ssh/key`, mode 0644 so any container uid can read it; the entrypoint copies it to `/tmp/heretic-ssh-<uid>/identity` (0600) and points `SSH_KEY_PATH` there, so `ssh -i "$SSH_KEY_PATH" …` works in the agent's shell (a `docker exec` shell keeps `/etc/heretic/ssh/key`; ssh-exec copies it the same way) |
 | `ssh.known_hosts` | `/etc/heretic/ssh/known_hosts` |
 | `~/.heretic/entrypoints/ssh-exec`, `entrypoint.sh` | `/opt/sidecar/ssh-exec`, `/entrypoint.sh` |
 

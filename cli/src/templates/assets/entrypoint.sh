@@ -183,6 +183,25 @@ WRAPPER
 
 setup_tool_wrappers
 
+# The SSH backend key is mounted 0644 so any container uid can read it, which
+# plain `ssh -i` refuses ("UNPROTECTED PRIVATE KEY FILE"). Stage the 0600 copy
+# ssh-exec makes anyway and point SSH_KEY_PATH at it for this session.
+stage_ssh_key() {
+    local key="${SSH_KEY_PATH:-}"
+    [[ -n "${SSH_HOST:-}" && -n "$key" && -r "$key" && -s "$key" ]] || return 0
+    local dir="${SSH_RUNTIME_DIR:-/tmp/heretic-ssh-$(id -u)}"
+    local copy="$dir/identity"
+    [[ "$key" != "$copy" ]] || return 0
+    { mkdir -p "$dir" && chmod 700 "$dir"; } 2>/dev/null || return 0
+    (umask 077 && cat "$key" > "$copy.tmp" && mv -f "$copy.tmp" "$copy") 2>/dev/null || return 0
+    export SSH_KEY_PATH="$copy"
+    local kh=""
+    [[ -n "${SSH_KNOWN_HOSTS:-}" ]] && kh=" -o UserKnownHostsFile=\"\$SSH_KNOWN_HOSTS\""
+    echo "SSH key: ssh -i \"\$SSH_KEY_PATH\"$kh -p ${SSH_PORT:-22} ${SSH_USER:-agent}@${SSH_HOST}"
+}
+
+stage_ssh_key
+
 # =============================================================================
 # Mode Detection
 # =============================================================================

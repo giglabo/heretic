@@ -18,11 +18,12 @@ import {
   getExistingMcpPath,
   hasUsableMcpConfig,
 } from "./mcp-helper";
-import { getDockerSocketMountSource } from "../utils/docker";
+import { getDindWiring } from "../utils/docker";
 import { loadSettings, resolveToken } from "../utils/settings";
 import { ensureSessionDir, getAgentContainerName, projectDirHash } from "../utils/session";
 import { generateEntrypoint } from "../templates";
 import { appendBinds, prepareSshBackend } from "./ssh-backend";
+import { ensureNestedMountpoints } from "./mountpoints";
 import { getLogger } from "../logger";
 
 const logger = getLogger();
@@ -361,11 +362,17 @@ export class ComposeRunner implements Runner {
       }
     }
 
-    // DinD → docker.sock bind
+    // DinD → docker.sock bind, its group for the non-root agent, host workspace path
+    let groupAdd: string[] | undefined;
     if (config.dind) {
-      const dockerSocketSource = getDockerSocketMountSource();
-      volumes.push(`${dockerSocketSource}:/var/run/docker.sock`);
-      logger.info(`Docker-in-Docker: mounting ${dockerSocketSource} → /var/run/docker.sock`);
+      const dind = getDindWiring(config);
+      volumes.push(`${dind.source}:/var/run/docker.sock`);
+      Object.assign(environment, dind.env);
+      if (dind.groupAdd.length > 0) groupAdd = dind.groupAdd;
+      logger.info(
+        `Docker-in-Docker: mounting ${dind.source} → /var/run/docker.sock` +
+          (groupAdd ? ` (group ${groupAdd.join(",")})` : "")
+      );
     }
 
     // Claude settings → merge to session dir as settings.json
@@ -416,6 +423,9 @@ export class ComposeRunner implements Runner {
       environment["HERETIC_RUN_AS_ROOT"] = "1";
     }
 
+    // Docker Desktop can't create a file mountpoint inside another bind (/workspace/.mcp.json)
+    ensureNestedMountpoints(volumes);
+
     // Build labels
     const labels: Record<string, string> = {
       "heretic.managed": "true",
@@ -439,6 +449,10 @@ export class ComposeRunner implements Runner {
 
     if (cmd) {
       agentService.command = cmd;
+    }
+
+    if (groupAdd) {
+      agentService.group_add = groupAdd;
     }
 
     // Gate the agent on each builder's health so wrappers only fire once the

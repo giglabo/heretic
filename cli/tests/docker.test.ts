@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeAll } from "bun:test";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
+  getDindWiring,
+  getDockerSocketGroup,
   createDockerClient,
   getDockerClient,
   getDockerSocketPath,
@@ -62,6 +67,42 @@ describe("Docker Utils", () => {
         "/var/run/docker.sock"
       );
       expect(getDockerSocketMountSource("linux", undefined)).toBe("/var/run/docker.sock");
+    });
+  });
+
+  describe("getDockerSocketGroup", () => {
+    it("is 0 for the VM socket on macOS and Windows (Docker Desktop: root:root 0660)", () => {
+      expect(getDockerSocketGroup("/var/run/docker.sock", "darwin")).toBe(0);
+      expect(getDockerSocketGroup("/var/run/docker.sock", "win32")).toBe(0);
+    });
+
+    it("reads the socket's gid on Linux, undefined when it is missing", () => {
+      const dir = mkdtempSync(join(tmpdir(), "heretic-sock-"));
+      const file = join(dir, "docker.sock");
+      writeFileSync(file, "");
+      expect(getDockerSocketGroup(file, "linux")).toBe(statSync(file).gid);
+      expect(getDockerSocketGroup(join(dir, "missing.sock"), "linux")).toBeUndefined();
+      rmSync(dir, { recursive: true, force: true });
+    });
+  });
+
+  describe("getDindWiring", () => {
+    it("binds the daemon socket with its group and passes the host workspace", () => {
+      const w = getDindWiring(
+        { projectDir: "/p", volumes: [{ source: "/p", target: "/workspace" }] },
+        "darwin",
+        undefined
+      );
+      expect(w).toEqual({
+        source: "/var/run/docker.sock",
+        groupAdd: ["0"],
+        env: { HERETIC_HOST_WORKSPACE: "/p" },
+      });
+    });
+
+    it("omits the host workspace when the project folder is not mounted", () => {
+      const w = getDindWiring({ projectDir: "/p", volumes: [] }, "darwin", undefined);
+      expect(w.env).toEqual({});
     });
   });
 

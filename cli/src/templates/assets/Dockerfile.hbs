@@ -156,7 +156,12 @@ RUN curl -fsSL "https://services.gradle.org/distributions/gradle-8.5-bin.zip" -o
 
 {{/if}}
 {{#if withRust}}
-# Install Rust {{{rustVersion}}}
+# Install Rust {{{rustVersion}}} (+ a C toolchain: rustc links through `cc`, and slim bases ship none)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain {{{rustVersion}}}
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustup component add rustfmt clippy
@@ -204,11 +209,13 @@ RUN (userdel -r node 2>/dev/null || true) \
     && useradd -m -s /bin/bash -u ${AGENT_UID} -g ${AGENT_GID} ${AGENT_USER}
 
 {{#if withRust}}
-# Copy Rust installation for agent user
+# Copy Rust installation for agent user. PATH goes in ENV, not .bashrc: /root is 0700,
+# and non-interactive shells (the agent's tool calls, the entrypoint's wrapper probe)
+# never read .bashrc.
 RUN cp -r /root/.cargo /home/${AGENT_USER}/.cargo \
     && cp -r /root/.rustup /home/${AGENT_USER}/.rustup 2>/dev/null || true \
-    && chown -R ${AGENT_USER}:${AGENT_USER} /home/${AGENT_USER}/.cargo \
-    && echo 'export PATH="/home/${AGENT_USER}/.cargo/bin:${PATH}"' >> /home/${AGENT_USER}/.bashrc
+    && chown -R ${AGENT_USER}:${AGENT_USER} /home/${AGENT_USER}/.cargo
+ENV PATH="/home/${AGENT_USER}/.cargo/bin:${PATH}"
 
 {{/if}}
 # {{{dirSectionComment}}}

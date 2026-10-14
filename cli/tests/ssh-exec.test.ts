@@ -70,6 +70,13 @@ runSuite("ssh-exec (simulated SSH tool)", () => {
     writeFileSync(join(binDir, "exit-with"), '#!/usr/bin/env bash\nexit "${1:-0}"\n');
     chmodSync(join(binDir, "exit-with"), 0o755);
 
+    // One value per line for each named variable: BSD printenv (macOS) takes a single name.
+    writeFileSync(
+      join(binDir, "print-vars"),
+      '#!/usr/bin/env bash\nfor v in "$@"; do printf "%s\\n" "${!v-}"; done\n'
+    );
+    chmodSync(join(binDir, "print-vars"), 0o755);
+
     // A real keypair for the -i assertions.
     keyPath = join(root, "id_test");
     const kg = spawnSync("ssh-keygen", ["-t", "ed25519", "-N", "", "-f", keyPath, "-q"], {
@@ -203,7 +210,8 @@ runSuite("ssh-exec (simulated SSH tool)", () => {
   });
 
   test("exports the captured host PATH and allowlisted env", () => {
-    const r = runSshExec(["printenv", "PATH", "CI", "SECRET"], {
+    // Absolute path: the remote PATH is SSH_HOST_PATH, which does not include binDir.
+    const r = runSshExec([join(binDir, "print-vars"), "PATH", "CI", "SECRET"], {
       env: {
         SSH_HOST: "h",
         SSH_HOST_PATH: `/opt/host-tools:${process.env.PATH}`,

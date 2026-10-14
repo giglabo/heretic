@@ -15,7 +15,7 @@ import type { ResolvedAgentConfig } from "../types/agent-profile";
 import type { Runner, RunResult } from "./types";
 import {
   getDockerClient,
-  getDockerSocketMountSource,
+  getDindWiring,
   isDockerAvailable,
   pullImage,
   stopContainer,
@@ -45,6 +45,7 @@ import {
 } from "./mcp-helper";
 import { SidecarManager, type SidecarWiring } from "./sidecar-manager";
 import { appendBinds, prepareSshBackend } from "./ssh-backend";
+import { ensureNestedMountpoints } from "./mountpoints";
 import { loadSettings, resolveToken } from "../utils/settings";
 import { ensureSessionDir, getAgentContainerName } from "../utils/session";
 import { generateEntrypoint } from "../templates";
@@ -782,11 +783,19 @@ export class DockerRunner implements Runner {
       }
     }
 
-    // DinD → docker.sock bind
+    // DinD → docker.sock bind, its group for the non-root agent, host workspace path
+    let groupAdd: string[] | undefined;
     if (config.dind) {
-      const dockerSocketSource = getDockerSocketMountSource();
-      binds.push(`${dockerSocketSource}:/var/run/docker.sock`);
-      logger.info(`Docker-in-Docker: mounting ${dockerSocketSource} → /var/run/docker.sock`);
+      const dind = getDindWiring(config);
+      binds.push(`${dind.source}:/var/run/docker.sock`);
+      for (const [key, value] of Object.entries(dind.env)) {
+        env.push(`${key}=${value}`);
+      }
+      if (dind.groupAdd.length > 0) groupAdd = dind.groupAdd;
+      logger.info(
+        `Docker-in-Docker: mounting ${dind.source} → /var/run/docker.sock` +
+          (groupAdd ? ` (group ${groupAdd.join(",")})` : "")
+      );
     }
 
     // Claude settings → merge to session dir as settings.json
@@ -852,6 +861,9 @@ export class DockerRunner implements Runner {
     // unreachable in that case).
     const networkMode = extra.network || (sidecarWiring ? sidecarWiring.networkName : undefined);
 
+    // Docker Desktop can't create a file mountpoint inside another bind (/workspace/.mcp.json)
+    ensureNestedMountpoints(binds);
+
     const options: ContainerCreateOptions = {
       Image: config.image,
       Cmd: cmd,
@@ -866,6 +878,7 @@ export class DockerRunner implements Runner {
       AttachStderr: true,
       HostConfig: {
         Binds: binds,
+        GroupAdd: groupAdd,
         NetworkMode: networkMode,
         PortBindings: ports?.portBindings,
         CapAdd: extra.capabilities,

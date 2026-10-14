@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { ComposeRunner } from "../src/runners/compose-runner";
 import type { ResolvedAgentConfig } from "../src/types/agent-profile";
 import { parseYaml } from "../src/utils/yaml";
+import { getDindWiring } from "../src/utils/docker";
 
 describe("ComposeRunner", () => {
   let mockConfig: ResolvedAgentConfig;
@@ -506,5 +507,47 @@ describe("ComposeRunner SSH backend", () => {
     expect(agent.environment.SSH_USER).toBe("agent");
     const keyBind = (agent.volumes || []).find((v: string) => v.includes("/etc/heretic/ssh/key"));
     expect(keyBind).toBeUndefined();
+  });
+});
+
+describe("ComposeRunner dind", () => {
+  let projectDir: string;
+
+  beforeEach(() => {
+    projectDir = mkdtempSync(join(tmpdir(), "heretic-dind-"));
+  });
+
+  afterEach(() => {
+    rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  test("adds the socket's group and the host workspace path to the agent", () => {
+    const runner = new ComposeRunner({
+      name: "test-agent",
+      projectDir,
+      sessionName: "default",
+      image: "test-image:latest",
+      runner: "compose",
+      agentType: "claude",
+      provider: "anthropic",
+      volumes: [{ source: projectDir, target: "/workspace" }],
+      env: {},
+      workdir: "/workspace",
+      command: [],
+      tty: false,
+      interactive: false,
+      extra: {},
+      dind: true,
+      mcpOverride: false,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const agent = parseYaml((runner as any).generateComposeYaml()).services.agent;
+    const dind = getDindWiring({
+      projectDir,
+      volumes: [{ source: projectDir, target: "/workspace" }],
+    });
+    expect(agent.volumes).toContain(`${dind.source}:/var/run/docker.sock`);
+    expect(agent.group_add).toEqual(dind.groupAdd.length > 0 ? dind.groupAdd : undefined);
+    expect(agent.environment.HERETIC_HOST_WORKSPACE).toBe(projectDir);
   });
 });

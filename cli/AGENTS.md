@@ -219,6 +219,14 @@ mcp_file: ~/shared/mcp-servers.json  # Optional: load MCP servers from JSON file
 
 Both runners bind `getDockerSocketMountSource()` to `/var/run/docker.sock` and log it at start. The bind source is resolved by the daemon, not the CLI: on macOS/Windows the daemon lives in a VM (Docker Desktop, Colima, OrbStack) whose socket is `/var/run/docker.sock`, so that is the source there — never the client socket `~/.docker/run/docker.sock` (`getDockerSocketPath()`, used only for the CLI's own dockerode connection). On Linux a `DOCKER_HOST=unix://…` (rootless) socket is used when set.
 
+Both take everything from `getDindWiring()` (`src/utils/docker.ts`): besides the bind, the
+socket's group goes into `GroupAdd` / `group_add` so the non-root `agent` user can use it
+(`getDockerSocketGroup()`: the socket's gid on Linux, `0` on macOS/Windows where Docker Desktop's VM
+socket is `root:root 0660` and the CLI cannot stat it), and `HERETIC_HOST_WORKSPACE` carries the
+project folder's host path, since `-v` sources of containers started through the socket are
+resolved on the host, where `/workspace` does not exist. User docs: `docs/USER_GUIDE.md` → Docker
+from the agent.
+
 ### Published Ports
 
 `src/utils/ports.ts` owns port publishing. Profile fields in `extra`: `ports` (docker `-p` specs — single ports, ranges `3000-3020`, remaps `13000-13020:3000-3020`, bind IPs `127.0.0.1:8080:8080` / `[::1]:80:80`, `/udp`), `port_presets` (`PORT_PRESETS` + groups `dev`, `all`), `ports_host_ip`, `ports_offset`. `resolveConfig()` expands them after interpolation (`buildPortMappings`) into `ResolvedAgentConfig.portMappings` and rewrites `extra.ports` as compact specs, so both runners only read `extra.ports` (docker-runner via `toDockerPortConfig`, which also fills `ExposedPorts` — the Engine API ignores bindings for ports the image doesn't EXPOSE; compose-runner passes the specs through). One binding per container port: explicit specs win over presets, later over earlier. `run-agent.ts` drops preset ports that are busy on the host (`dropBusyOptionalPorts`) before the runner starts. CLI: `-p/--port`, `--port-preset` (both append via `ResolveOptions.addPorts` / `addPortPresets`), `--port-host-ip`, `--port-offset`, `--no-ports`; `heretic-cli port-presets` lists presets. User docs: `docs/USER_GUIDE.md` → Publishing Ports.
@@ -237,6 +245,13 @@ mount the profile's servers instead.
 missing, 0-byte, whitespace-only, invalid JSON, or that declares no servers counts as **absent**,
 so the profile's MCP still mounts. Existence alone is not enough — a stray empty `.mcp.json` in the
 project root would otherwise silently leave the agent with no MCP servers at all.
+
+Both runners call `ensureNestedMountpoints()` (`src/runners/mountpoints.ts`) on the final bind
+list: every file bind whose target lies inside a directory bind (`/workspace/.mcp.json` inside
+`<project>:/workspace`, `mcp-config.json` inside the session dir) gets an empty host-side
+placeholder if missing. Docker Desktop (virtiofs) cannot create that mountpoint and fails the first
+run with `mountpoint … is outside of rootfs`; Linux Docker creates the same empty file anyway. The
+empty file is "absent" for `hasUsableMcpConfig()`, so it never suppresses the profile's mount.
 
 Note that the project directory is the directory you launch from, not the repo you intend to work
 on. Running an agent from a parent directory makes that parent the project root, and its
@@ -344,7 +359,10 @@ presets node/python/java/go/rust). Code map:
 | `assets/entrypoint.sh` | `setup_tool_wrappers`: SSH candidates = listed ∧ not local ∧ not denied ∧ not sidecar; one `ssh-exec --probe` at start-up keeps only host-present commands; also writes the `host-run` (`ssh-exec --run`) and `auto-run` (`ssh-exec --auto`: local when ELF-for-this-CPU / script / local command, else host — Mach-O, PE, foreign ELF) launchers unless `SSH_HOST_RUN=0` |
 
 Key and known_hosts mount to `/etc/heretic/ssh/{key,known_hosts}` (not `~/.ssh`, which Docker
-would create root-owned). `docker-host` defaults `host_cwd` to the project dir and `user` to the
+would create root-owned). The key is 0644 there (readable by any container uid), which plain
+`ssh -i` rejects: the entrypoint's `stage_ssh_key` copies it to `/tmp/heretic-ssh-<uid>/identity`
+(0600, the file `ssh-exec` uses too) and exports `SSH_KEY_PATH` for the agent's shell
+(`tests/entrypoint-ssh-key.test.ts`). `docker-host` defaults `host_cwd` to the project dir and `user` to the
 current user. Tests: `tests/ssh-exec.test.ts` (fake ssh), `tests/ssh-backend.test.ts` (pure),
 `tests/e2e/ssh-e2e.sh` (real sshd + CLI + container; CI job `ssh-e2e`, needs root),
 `scripts/test-ssh-docker-host.sh` (as the current user, Linux or macOS; CI jobs `ssh-e2e` and

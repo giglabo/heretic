@@ -1,6 +1,7 @@
 import Docker from "dockerode";
 import type { ContainerCreateOptions, ImageInfo, ContainerInfo } from "dockerode";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import type { ResolvedAgentConfig } from "../types/agent-profile";
 
 /**
  * Get the Docker socket path for the current platform
@@ -42,6 +43,51 @@ export function getDockerSocketMountSource(
     return dockerHost.slice("unix://".length);
   }
   return "/var/run/docker.sock";
+}
+
+/**
+ * Group owning the docker.sock that `dind: true` mounts, added to the agent
+ * container so its non-root user can use the socket.
+ *
+ * On Linux the daemon is local, so this is the socket's own gid (usually the
+ * `docker` group). On macOS and Windows the socket lives in the daemon's VM,
+ * which the CLI cannot stat; Docker Desktop's is root:root 0660, so gid 0.
+ */
+export function getDockerSocketGroup(
+  source: string,
+  platform: NodeJS.Platform = process.platform
+): number | undefined {
+  if (platform !== "linux") return 0;
+  try {
+    return statSync(source).gid;
+  } catch {
+    return undefined;
+  }
+}
+
+/** What `dind: true` adds to the agent container, shared by both runners. */
+export interface DindWiring {
+  /** Daemon-side socket, bound to /var/run/docker.sock */
+  source: string;
+  /** Supplementary groups (GroupAdd / group_add) */
+  groupAdd: string[];
+  env: Record<string, string>;
+}
+
+export function getDindWiring(
+  config: Pick<ResolvedAgentConfig, "projectDir" | "volumes">,
+  platform: NodeJS.Platform = process.platform,
+  dockerHost: string | undefined = process.env.DOCKER_HOST
+): DindWiring {
+  const source = getDockerSocketMountSource(platform, dockerHost);
+  const gid = getDockerSocketGroup(source, platform);
+  const env: Record<string, string> = {};
+  // Containers started through the socket resolve `-v` sources on the daemon's
+  // side, where /workspace does not exist: give the agent the host path.
+  if (config.volumes.some((v) => v.source === config.projectDir)) {
+    env.HERETIC_HOST_WORKSPACE = config.projectDir;
+  }
+  return { source, groupAdd: gid === undefined ? [] : [String(gid)], env };
 }
 
 /**

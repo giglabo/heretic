@@ -5,10 +5,11 @@
  */
 
 import { describe, test, expect, afterEach, beforeEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DockerRunner } from "../src/runners/docker-runner";
+import { getDindWiring } from "../src/utils/docker";
 import type { ResolvedAgentConfig } from "../src/types/agent-profile";
 
 describe("DockerRunner", () => {
@@ -336,6 +337,16 @@ describe("DockerRunner", () => {
     expect(dockerSockBind).toBeDefined();
   });
 
+  test("translateConfig gives the agent the socket's group and the host workspace with dind", () => {
+    const runner = new DockerRunner({ ...mockConfig, dind: true });
+    const options = (runner as any).translateConfig();
+    const dind = getDindWiring(mockConfig);
+    expect(options.HostConfig?.GroupAdd).toEqual(
+      dind.groupAdd.length > 0 ? dind.groupAdd : undefined
+    );
+    expect(options.Env).toContain(`HERETIC_HOST_WORKSPACE=${tempProjectDir}`);
+  });
+
   test("translateConfig does not add docker.sock when dind is false", () => {
     const runner = new DockerRunner(mockConfig);
     const translateConfig = (runner as any).translateConfig.bind(runner);
@@ -471,6 +482,19 @@ describe("DockerRunner", () => {
       // With mcpOverride: true, MCP should always be mounted
       const mcpBind = options.HostConfig?.Binds?.find((b: string) => b.includes(".mcp.json"));
       expect(mcpBind).toBeDefined();
+    });
+
+    test("translateConfig creates the /workspace/.mcp.json mountpoint in the project", () => {
+      tempProjectDir = mkdtempSync(join(tmpdir(), "heretic-test-"));
+      const runner = new DockerRunner({
+        ...mockConfig,
+        projectDir: tempProjectDir,
+        volumes: [{ source: tempProjectDir, target: "/workspace" }],
+        mcp: [{ name: "test-server", command: "npx" }],
+      });
+      (runner as any).translateConfig();
+      // Docker Desktop fails the first run without it ("... is outside of rootfs")
+      expect(readFileSync(join(tempProjectDir, ".mcp.json"), "utf-8")).toBe("");
     });
   });
 
