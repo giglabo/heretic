@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { getLogger, logRaw } from "../logger";
 import { isDockerAvailable, listContainers, getDockerClient } from "../utils/docker";
 import type { ContainerInfo } from "dockerode";
@@ -92,11 +93,32 @@ export async function runAttach(name: string, options?: { session?: string }): P
       process.exit(1);
     }
 
-    // Verify container is running
+    // A stopped session container is started again the way `run` does it —
+    // as it is when it can be, else carried over with its files and only the
+    // host ports that are free — and then attached to.
     if (containerInfo.State !== "running") {
+      const labels = containerInfo.Labels || {};
+      const agent = labels["heretic.agent"];
+      const project = labels["heretic.project"];
+      const session = labels["heretic.session"];
+      if (
+        agent &&
+        project &&
+        session &&
+        labels["heretic.role"] !== "build-sidecar" &&
+        existsSync(project)
+      ) {
+        logger.info(
+          `'${name}' is ${containerInfo.State}; starting session '${session}' of '${agent}' in ${project}`
+        );
+        process.chdir(project);
+        const { runAgent } = await import("./run-agent");
+        await runAgent(agent, { session });
+        return;
+      }
       logger.error(
         { name, state: containerInfo.State },
-        `Container '${name}' is not running (state: ${containerInfo.State})`
+        `Container '${name}' is not running (state: ${containerInfo.State}) and is not a heretic session container to start`
       );
       process.exit(1);
     }

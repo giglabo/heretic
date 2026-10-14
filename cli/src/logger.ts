@@ -21,6 +21,17 @@ function isCompiledBinary(): boolean {
 }
 
 /**
+ * The text of an error as serialized into a log line (pino's `err`
+ * serializer, or a dockerode error's `json.message`), or "" when there is none.
+ */
+export function errorText(error: unknown): string {
+  if (!error || typeof error !== "object") return "";
+  const e = error as { message?: unknown; json?: { message?: unknown }; reason?: unknown };
+  const text = e.json?.message ?? e.message ?? e.reason;
+  return typeof text === "string" ? text.replace(/^\(HTTP code \d+\) [^-]*- /, "").trim() : "";
+}
+
+/**
  * Initialize the logger with options
  */
 export function initLogger(options: LoggerOptions = {}): pino.Logger {
@@ -63,7 +74,11 @@ export function initLogger(options: LoggerOptions = {}): pino.Logger {
               const reset = "\x1b[0m";
               const color = colors[levelName] || reset;
 
-              process.stdout.write(`${color}${levelName}${reset} ${message}\n`);
+              // An error passed as an object would otherwise be dropped here:
+              // say what it was.
+              const detail = errorText(obj.error ?? obj.err);
+              const line = detail && !message.includes(detail) ? `${message}: ${detail}` : message;
+              process.stdout.write(`${color}${levelName}${reset} ${line}\n`);
             } catch {
               process.stdout.write(msg);
             }
@@ -85,6 +100,7 @@ export function initLogger(options: LoggerOptions = {}): pino.Logger {
     logger = pino(
       {
         level: verbose ? "debug" : "info",
+        serializers: { error: pino.stdSerializers.err, err: pino.stdSerializers.err },
       },
       pino.multistream(streams)
     );

@@ -24,9 +24,17 @@ import {
   isContainerActive,
 } from "../utils/docker";
 import {
+  BASE_IMAGE_LABEL,
   CONFIG_HASH_LABEL,
+  SNAPSHOT_REPO,
   computeConfigHash,
+  decideReuse,
+  describeError,
+  hostPortsOf,
+  isPortConflict,
+  legacyConfigHashes,
   ownsSessionContainer,
+  type ReuseDecision,
 } from "../utils/container-reuse";
 import {
   writeMcpFile,
@@ -41,9 +49,24 @@ import { loadSettings, resolveToken } from "../utils/settings";
 import { ensureSessionDir, getAgentContainerName } from "../utils/session";
 import { generateEntrypoint } from "../templates";
 import { getLogger } from "../logger";
-import { toDockerPortConfig } from "../utils/ports";
+import { isHostPortFree, toDockerPortConfig } from "../utils/ports";
 
 const logger = getLogger();
+
+/** A stopped container being carried over to a new one with the same files. */
+interface Carried {
+  oldId: string;
+  oldImage: string;
+  /** The name the old container was moved to while the new one takes its own. */
+  aside: string;
+  /** The snapshot image the new container is created from. */
+  snapshot: string;
+}
+
+/** "20261014-193306" — a UTC stamp for snapshot tags and names set aside. */
+function stamp(): string {
+  return new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
+}
 
 /**
  * Docker runner that manages a single container for an agent
@@ -54,6 +77,8 @@ export class DockerRunner implements Runner {
   private mcpFilePath?: string;
   private sidecarManager?: SidecarManager;
   private sidecarsStarted = false;
+  /** The container was created by this run, so a failed run may remove it. */
+  private createdThisRun = false;
 
   constructor(private config: ResolvedAgentConfig) {
     this.docker = getDockerClient();
@@ -86,16 +111,38 @@ export class DockerRunner implements Runner {
 
       const containerOptions = this.translateConfig(command, plannedWiring);
       const configHash = computeConfigHash(containerOptions);
-      containerOptions.Labels = { ...containerOptions.Labels, [CONFIG_HASH_LABEL]: configHash };
+      containerOptions.Labels = {
+        ...containerOptions.Labels,
+        [CONFIG_HASH_LABEL]: configHash,
+        ...(imageId ? { [BASE_IMAGE_LABEL]: imageId } : {}),
+      };
       const containerName = this.generateContainerName();
 
-      // Reuse this session's stopped container when nothing changed, so what was
-      // installed or changed inside it survives between runs.
+      // Reuse this session's stopped container, so what was installed or
+      // changed inside it survives between runs. One that can't start as it is
+      // (its host ports taken, its configuration changed) is carried over to a
+      // new container with the same files — never thrown away (decideReuse).
+      let carried: Carried | undefined;
       if (!recreate) {
-        const reusable = await this.findReusableContainer(containerName, configHash, imageId);
-        if (reusable) {
-          const resumed = await this.resumeContainer(reusable, containerName, detach);
-          if (resumed) return resumed;
+        const found = await this.planReuse(containerName, containerOptions, configHash, imageId);
+        if (found?.decision.kind === "refuse") {
+          throw new Error(
+            `A container named '${containerName}' exists, but ${found.decision.reason}; it was left alone. ` +
+              `Use another session name (-s <name>), or remove it yourself: docker rm ${containerName}`
+          );
+        }
+        if (found?.decision.kind === "reuse") {
+          const resumed = await this.resumeContainer(found.existing, containerName, detach);
+          if (resumed !== "ports-taken") return resumed;
+          carried = await this.carryOver(
+            found.existing,
+            containerName,
+            "Docker says a host port it publishes is taken"
+          );
+        } else if (found?.decision.kind === "carry") {
+          carried = await this.carryOver(found.existing, containerName, found.decision.reason);
+        } else if (found?.decision.kind === "snapshot-and-replace") {
+          await this.snapshotAndRemove(found.existing, containerName, found.decision.reason);
         }
       }
 
@@ -105,15 +152,29 @@ export class DockerRunner implements Runner {
 
       logger.debug({ containerOptions, containerName }, "Creating container");
 
-      // Remove existing container with same name if it exists
-      await this.removeExistingContainer(containerName);
+      // --recreate: the person asked for a fresh container in place of this one
+      if (recreate) await this.removeExistingContainer(containerName);
 
-      const container = await this.docker.createContainer({
-        ...containerOptions,
-        name: containerName,
-      });
+      let container: Docker.Container;
+      try {
+        container = await this.docker.createContainer({
+          ...containerOptions,
+          ...(carried ? { Image: carried.snapshot } : {}),
+          name: containerName,
+        });
+      } catch (error) {
+        if (carried) await this.undoCarry(carried, containerName);
+        throw error;
+      }
 
       this.containerId = container.id;
+      if (carried) {
+        // The files now live in this container (and its snapshot): a failure
+        // below leaves it for the next run rather than removing it.
+        await this.finishCarry(carried);
+      } else {
+        this.createdThisRun = true;
+      }
       logger.info({ containerId: this.containerId, name: containerName }, "Container created");
 
       // Handle detached vs interactive mode
@@ -131,15 +192,17 @@ export class DockerRunner implements Runner {
         return await this.runInteractive(container);
       }
     } catch (error) {
-      // Cleanup: remove container if we created it but something failed
-      if (this.containerId) {
+      // Cleanup: remove the container only if this run created it fresh; a
+      // reused or carried-over one holds the session's files and is kept.
+      if (this.containerId && this.createdThisRun) {
         try {
           await removeContainer(this.containerId, { force: true }, this.docker);
         } catch (cleanupError) {
           logger.debug({ error: cleanupError }, "Failed to cleanup container");
         }
-        this.containerId = undefined;
       }
+      this.containerId = undefined;
+      this.createdThisRun = false;
 
       // Cleanup MCP temp file
       if (this.mcpFilePath) {
@@ -334,15 +397,17 @@ export class DockerRunner implements Runner {
   }
 
   /**
-   * This session's stopped container, if it can be started again as is: it is
-   * ours by its labels, was made from the same create options and image.
-   * Anything else is logged and recreated.
+   * This session's stopped container and what to do with it (decideReuse):
+   * start it as it is, carry it over, snapshot and replace it, or leave
+   * another session's container alone. Undefined when there is none, or it is
+   * live (`run` attaches to a live one before getting here).
    */
-  private async findReusableContainer(
+  private async planReuse(
     containerName: string,
+    options: ContainerCreateOptions,
     configHash: string,
     imageId: string | undefined
-  ): Promise<ContainerInfo | undefined> {
+  ): Promise<{ existing: ContainerInfo; decision: ReuseDecision } | undefined> {
     let existing: ContainerInfo | undefined;
     try {
       existing = await findContainerByName(containerName, this.docker);
@@ -352,47 +417,59 @@ export class DockerRunner implements Runner {
     }
     if (!existing || isContainerActive(existing)) return undefined;
 
-    if (!ownsSessionContainer(existing.Labels, this.config)) {
-      logger.warn(
-        `Container '${containerName}' belongs to another profile, folder or session; recreating it`
-      );
-      return undefined;
+    // The ports it was created with: list() shows them only while it runs.
+    let exposedPorts: unknown;
+    let portBindings: unknown;
+    try {
+      const info = await this.docker.getContainer(existing.Id).inspect();
+      exposedPorts = info.Config?.ExposedPorts;
+      portBindings = info.HostConfig?.PortBindings;
+    } catch (error) {
+      logger.debug({ error, containerName }, "Could not inspect the stopped container");
     }
-    const previousHash = existing.Labels?.[CONFIG_HASH_LABEL];
-    if (!previousHash) {
-      logger.info(`Container '${containerName}' predates container reuse; recreating it`);
-      return undefined;
-    }
-    if (previousHash !== configHash) {
-      logger.warn(
-        `Configuration changed since '${containerName}' was created (profile, local override or flags); recreating it`
-      );
-      return undefined;
-    }
-    if (imageId && existing.ImageID !== imageId) {
-      logger.warn(`Image '${this.config.image}' was updated; recreating '${containerName}'`);
-      return undefined;
-    }
-    return existing;
+    const published = hostPortsOf(portBindings);
+    const free = await Promise.all(
+      published.map((p) => isHostPortFree(p.port, p.protocol, p.hostIp))
+    );
+    const busyPorts = published
+      .filter((_, i) => !free[i])
+      .map((p) => (p.protocol === "tcp" ? String(p.port) : `${p.port}/${p.protocol}`));
+
+    const decision = decideReuse({
+      owned: ownsSessionContainer(existing.Labels, this.config),
+      baseImage: existing.Labels?.[BASE_IMAGE_LABEL] ?? existing.ImageID,
+      imageId,
+      storedHash: existing.Labels?.[CONFIG_HASH_LABEL],
+      hash: configHash,
+      legacyHashes: legacyConfigHashes(options, exposedPorts, portBindings),
+      busyPorts,
+    });
+    return { existing, decision };
   }
 
   /**
-   * Start a reusable stopped container again. Returns undefined (after cleaning
-   * up) when Docker can't start it, so the caller falls back to recreating.
+   * Start a reusable stopped container again. "ports-taken" when Docker says
+   * a host port it publishes is taken, so the caller carries it over; any
+   * other refusal is an error that leaves the container as it is.
    */
   private async resumeContainer(
     existing: ContainerInfo,
     containerName: string,
     detach: boolean
-  ): Promise<RunResult | undefined> {
+  ): Promise<RunResult | "ports-taken"> {
     logger.info(`Reusing stopped container '${containerName}' (pass --recreate for a fresh one)`);
     await this.startSidecars();
     const container = this.docker.getContainer(existing.Id);
     try {
       await container.start();
     } catch (error) {
-      logger.warn({ error }, `Could not restart '${containerName}'; recreating it`);
-      return undefined;
+      if (isPortConflict(error)) {
+        logger.warn(`Could not start '${containerName}': ${describeError(error)}`);
+        return "ports-taken";
+      }
+      throw new Error(
+        `Could not start '${containerName}': ${describeError(error)}. The container was left as it is; nothing was removed.`
+      );
     }
     this.containerId = existing.Id;
 
@@ -402,6 +479,121 @@ export class DockerRunner implements Runner {
       return { containerId: this.containerId, status: "running" };
     }
     return await this.runInteractive(container, { started: true });
+  }
+
+  /**
+   * Snapshot a stopped container (`docker commit`) and move it aside, so a new
+   * container with the same name can be created from the snapshot with the
+   * current configuration and only the host ports that are free. Docker can't
+   * change an existing container's ports; this keeps every file in it.
+   */
+  private async carryOver(
+    existing: ContainerInfo,
+    containerName: string,
+    reason: string
+  ): Promise<Carried> {
+    const when = stamp();
+    const tag = `${containerName}-${when}`.slice(0, 128);
+    const snapshot = `${SNAPSHOT_REPO}:${tag}`;
+    logger.warn(
+      `Carrying '${containerName}' over to a new container: ${reason}. Its files are kept (snapshot ${snapshot}); a large container takes a while.`
+    );
+    const old = this.docker.getContainer(existing.Id);
+    try {
+      await old.commit({
+        repo: SNAPSHOT_REPO,
+        tag,
+        pause: false,
+        comment: `heretic: ${containerName} carried over (${reason})`,
+      });
+    } catch (error) {
+      throw new Error(
+        `Could not snapshot '${containerName}' to carry it over: ${describeError(error)}. Nothing was changed; the container is as it was.`
+      );
+    }
+    const aside = `${containerName}-carried-${when}`;
+    try {
+      await old.rename({ name: aside });
+    } catch (error) {
+      await this.removeSnapshotQuietly(snapshot);
+      throw new Error(
+        `Could not move '${containerName}' aside to carry it over: ${describeError(error)}. Nothing was changed.`
+      );
+    }
+    return { oldId: existing.Id, oldImage: existing.ImageID, aside, snapshot };
+  }
+
+  /** The new container could not be created: give the old one its name back. */
+  private async undoCarry(carried: Carried, containerName: string): Promise<void> {
+    try {
+      await this.docker.getContainer(carried.oldId).rename({ name: containerName });
+    } catch (error) {
+      logger.warn(
+        `Could not give '${carried.aside}' its name '${containerName}' back: ${describeError(error)}. Its files are in it, and in ${carried.snapshot}.`
+      );
+      return;
+    }
+    await this.removeSnapshotQuietly(carried.snapshot);
+  }
+
+  /** The new container exists: the old one, and a snapshot it ran from, can go. */
+  private async finishCarry(carried: Carried): Promise<void> {
+    try {
+      await this.docker.getContainer(carried.oldId).remove({ force: true });
+    } catch (error) {
+      logger.warn(
+        `The old container '${carried.aside}' could not be removed: ${describeError(error)}. Its files are in the new one too; remove it with: docker rm ${carried.aside}`
+      );
+      return;
+    }
+    await this.removeSnapshotQuietly(carried.oldImage);
+    logger.info(`Carried over: the new container runs from ${carried.snapshot}`);
+  }
+
+  /**
+   * The profile image was rebuilt: keep the old container's files in a
+   * snapshot image, then remove it so a fresh container takes its name.
+   */
+  private async snapshotAndRemove(
+    existing: ContainerInfo,
+    containerName: string,
+    reason: string
+  ): Promise<void> {
+    const tag = `${containerName}-${stamp()}`.slice(0, 128);
+    const snapshot = `${SNAPSHOT_REPO}:${tag}`;
+    logger.warn(
+      `Replacing '${containerName}' with a fresh container: ${reason}. Its files are kept in ${snapshot}; a large container takes a while.`
+    );
+    const old = this.docker.getContainer(existing.Id);
+    try {
+      await old.commit({
+        repo: SNAPSHOT_REPO,
+        tag,
+        pause: false,
+        comment: `heretic: ${containerName} replaced (${reason})`,
+      });
+    } catch (error) {
+      throw new Error(
+        `Could not snapshot '${containerName}' before replacing it: ${describeError(error)}. Nothing was changed; pass --recreate to replace it without keeping its files.`
+      );
+    }
+    await old.remove({ force: true });
+    await this.removeSnapshotQuietly(existing.ImageID);
+    logger.info(
+      `The old files: docker run --rm -it --entrypoint bash ${snapshot} (remove with: docker rmi ${snapshot})`
+    );
+  }
+
+  /** Remove a heretic snapshot image nothing uses any more; anything else is left. */
+  private async removeSnapshotQuietly(image: string): Promise<void> {
+    try {
+      const handle = this.docker.getImage(image);
+      const info = await handle.inspect();
+      if (!(info.RepoTags || []).some((t: string) => t.startsWith(`${SNAPSHOT_REPO}:`))) return;
+      await handle.remove();
+    } catch {
+      // still in use by a container, or already gone
+    }
   }
 
   /**
@@ -933,9 +1125,12 @@ export class DockerRunner implements Runner {
   private handleError(error: unknown): void {
     const err = error as Record<string, unknown>;
     if (err.statusCode === 404) {
-      logger.error({ error }, "Container or image not found");
+      logger.error({ error }, `Container or image not found: ${describeError(error)}`);
     } else if (err.statusCode === 409) {
-      logger.error({ error }, "Container conflict (name or port already in use)");
+      logger.error(
+        { error },
+        `Container conflict (name or port already in use): ${describeError(error)}`
+      );
     } else if (err.errno === "EACCES") {
       logger.error(
         { error },
@@ -944,7 +1139,7 @@ export class DockerRunner implements Runner {
     } else if (err.errno === "ECONNREFUSED") {
       logger.error({ error }, "Cannot connect to Docker daemon");
     } else {
-      logger.error({ error }, "Docker operation failed");
+      logger.error({ error }, `Docker operation failed: ${describeError(error)}`);
     }
   }
 }
