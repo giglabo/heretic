@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish-npm:
+    needs: verify
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run bundle
+      - name: Verify bundle
+        run: bun dist/heretic-cli.js --version
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # The tag must match cli/package.json, which is what `--version` and
+  # `heretic-cli update` compare against.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches package.json version
+        run: |
+          pkg=$(jq -r .version cli/package.json)
+          if [[ "v$pkg" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match cli/package.json version $pkg"
+            exit 1
+          fi
+
+  build-binaries:
+    needs: verify
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            artifact: heretic-cli-linux-x64
+          - os: ubuntu-latest
+            target: bun-linux-arm64
+            artifact: heretic-cli-linux-arm64
+          - os: macos-latest
+            target: bun-darwin-x64
+            artifact: heretic-cli-macos-x64
+          - os: macos-latest
+            target: bun-darwin-arm64
+            artifact: heretic-cli-macos-arm64
+          - os: windows-latest
+            target: bun-windows-x64
+            artifact: heretic-cli-windows.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Build native binary
+        run: bun build ./src/index.ts --compile --target=${{ matrix.target }} --outfile dist/${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: cli/dist/${{ matrix.artifact }}
+
+  # Static exec-server binaries: the server half of the build-sidecar protocol,
+  # for custom builder images or a host-side exec daemon.
+  exec-server:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    defaults:
+      run:
+        working-directory: cli/build-sidecars/exec-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/build-sidecars/exec-server/go.mod
+      - name: Build
+        run: |
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/exec-server-${{ matrix.goos }}-${{ matrix.goarch }}" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exec-server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: exec-server-${{ matrix.goos }}-${{ matrix.goarch }}
+
+  # One upload with every asset + SHA256SUMS. Asset names stay exactly
+  # heretic-cli-<platform>, which `heretic-cli update` looks up by name.
+  publish-release:
+    needs: [build-binaries, exec-server]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Checksums
+        working-directory: assets
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*

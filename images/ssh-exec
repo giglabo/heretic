@@ -1,0 +1,57 @@
+#!/bin/bash
+# ssh-exec - Execute commands on a remote host via SSH
+#
+# This script mirrors the sidecar-exec contract but routes commands
+# over SSH instead of HTTP. Used as a backend for tool wrappers when
+# SSH_HOST is configured.
+#
+# Usage:
+#   ssh-exec <command> [args...]
+#
+# Examples:
+#   ssh-exec npm install
+#   ssh-exec python3 -m pytest -v
+#   ssh-exec go build ./...
+#
+# Environment:
+#   SSH_HOST      - Remote host (required)
+#   SSH_PORT      - SSH port (default: 22)
+#   SSH_USER      - SSH username (default: agent)
+#   SSH_KEY_PATH  - Path to SSH private key (default: /home/agent/.ssh/id_rsa)
+#   SSH_HOST_CWD  - Working directory on remote host (default: current directory)
+
+set -euo pipefail
+
+# Configuration
+HOST="${SSH_HOST:?ssh-exec: SSH_HOST is not set}"
+PORT="${SSH_PORT:-22}"
+USER="${SSH_USER:-agent}"
+KEY_PATH="${SSH_KEY_PATH:-/home/agent/.ssh/id_rsa}"
+REMOTE_CWD="${SSH_HOST_CWD:-$(pwd)}"
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: ssh-exec <command> [args...]" >&2
+    exit 1
+fi
+
+# Build escaped command string
+escaped_args=()
+for arg in "$@"; do
+    escaped_args+=("$(printf '%q' "$arg")")
+done
+
+# Build SSH options
+SSH_OPTS=(
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o LogLevel=ERROR
+    -p "$PORT"
+)
+
+if [[ -f "$KEY_PATH" ]]; then
+    SSH_OPTS+=(-i "$KEY_PATH")
+fi
+
+# Execute remotely — cd to working directory and run command
+exec ssh "${SSH_OPTS[@]}" "${USER}@${HOST}" \
+    "cd $(printf '%q' "$REMOTE_CWD") && ${escaped_args[*]}"

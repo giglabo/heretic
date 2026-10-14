@@ -1,0 +1,1 @@
+./build-heretic-agent --agent claude --agent copilot --with-python --with-node --with-docker -n heretic-local-fat --base ubuntu:22.04 --combined

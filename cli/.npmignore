@@ -1,0 +1,10 @@
+src/
+tests/
+tsconfig.json
+eslint.config.js
+.prettierrc
+bun.lock
+.heretic/
+docs/
+*.test.ts
+.claude/
